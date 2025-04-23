@@ -1,0 +1,10 @@
+/Users/danushkastanley/Developer/Msc/pod-agent/target/debug/deps/libmemoffset-63c78cded740bc16.rmeta: /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs
+
+/Users/danushkastanley/Developer/Msc/pod-agent/target/debug/deps/libmemoffset-63c78cded740bc16.rlib: /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs
+
+/Users/danushkastanley/Developer/Msc/pod-agent/target/debug/deps/memoffset-63c78cded740bc16.d: /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs /Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs
+
+/Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs:
+/Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs:
+/Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs:
+/Users/danushkastanley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs:
