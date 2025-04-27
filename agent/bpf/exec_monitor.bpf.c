@@ -3,6 +3,9 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
+// Define the GPL license
+char LICENSE[] SEC("license") = "GPL";
+
 struct event {
     __u32 pid;
     char comm[TASK_COMM_LEN];
