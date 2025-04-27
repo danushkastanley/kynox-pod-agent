@@ -22,9 +22,6 @@ spec:
         image: pod-agent:latest         # Use local tag
         imagePullPolicy: IfNotPresent # Use local image
         # --- End image config ---
-        # --- Override entrypoint for debugging --- 
-        command: ["/bin/sleep", "infinity"]
-        # --- End override --- 
         securityContext:
           privileged: true              # Needed for eBPF kernel access
         volumeMounts:                 # Mount necessary host paths
