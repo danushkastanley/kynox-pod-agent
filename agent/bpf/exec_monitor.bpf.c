@@ -1,11 +1,10 @@
-#include <linux/sched.h>
-#include <linux/ptrace.h>
-#include <linux/limits.h>
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 
 struct event {
-    u32 pid;
+    __u32 pid;
     char comm[TASK_COMM_LEN];
     char filename[256];
 };
@@ -13,11 +12,11 @@ struct event {
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 24);
-} events SEC(".maps");
+} rb SEC(".maps");
 
-SEC("tracepoint/syscalls/sys_enter_execve")
+SEC("tp/syscalls/sys_enter_execve")
 int handle_execve(struct trace_event_raw_sys_enter *ctx) {
-    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
@@ -26,9 +25,9 @@ int handle_execve(struct trace_event_raw_sys_enter *ctx) {
     return 0;
 }
 
-SEC("tracepoint/syscalls/sys_enter_execveat")
+SEC("tp/syscalls/sys_enter_execveat")
 int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
-    struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
@@ -36,5 +35,3 @@ int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
-
-char LICENSE[] SEC("license") = "GPL";
