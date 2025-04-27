@@ -6,7 +6,11 @@
 // Define the GPL license
 char LICENSE[] SEC("license") = "GPL";
 
+#define EVENT_TYPE_EXEC 0
+#define EVENT_TYPE_OPEN 1
+
 struct event {
+    __u32 event_type; // 0 for exec, 1 for open/openat
     __u32 pid;
     char comm[TASK_COMM_LEN];
     char filename[256];
@@ -21,6 +25,7 @@ SEC("tp/syscalls/sys_enter_execve")
 int handle_execve(struct trace_event_raw_sys_enter *ctx) {
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
+    e->event_type = EVENT_TYPE_EXEC;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
     bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]);
@@ -32,8 +37,35 @@ SEC("tp/syscalls/sys_enter_execveat")
 int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
     struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
+    e->event_type = EVENT_TYPE_EXEC;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]);
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_open")
+int handle_open(struct trace_event_raw_sys_enter *ctx) {
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+    e->event_type = EVENT_TYPE_OPEN;
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    // The filename is the first argument for open
+    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]);
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_openat")
+int handle_openat(struct trace_event_raw_sys_enter *ctx) {
+    struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+    e->event_type = EVENT_TYPE_OPEN;
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    // The filename is the second argument for openat
     bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]);
     bpf_ringbuf_submit(e, 0);
     return 0;
