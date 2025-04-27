@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/types.h>
+#include <linux/socket.h>
+#include <sys/socket.h>
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
