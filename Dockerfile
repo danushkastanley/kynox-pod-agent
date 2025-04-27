@@ -36,7 +36,7 @@ RUN ln -sf /usr/include/linux /usr/include/linux || true
 # RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > /usr/include/vmlinux.h
 
 # Install rustfmt
-RUN rustup component add rustfmt
+RUN /usr/local/cargo/bin/rustup component add rustfmt
 
 WORKDIR /workspace
 COPY . .
