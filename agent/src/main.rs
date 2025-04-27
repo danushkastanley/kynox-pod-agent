@@ -22,6 +22,7 @@ const FILENAME_LEN: usize = 256;
 const EVENT_TYPE_EXEC: u32 = 0;
 const EVENT_TYPE_OPEN: u32 = 1;
 const EVENT_TYPE_CONNECT: u32 = 2;
+const EVENT_TYPE_FORK: u32 = 3;
 
 // Structure to hold raw network info (matching C layout)
 #[derive(Copy, Clone)]
@@ -41,6 +42,8 @@ struct RawEvent {
     // Represents the C union { char filename[256]; struct { u32 daddr; u16 dport; } net_info; };
     // Size is FILENAME_LEN (256) which is larger than RawNetInfo (6)
     union_data: [u8; FILENAME_LEN],
+    parent_pid: u32,
+    child_pid: u32,
 }
 
 // User-friendly, serializable event struct
@@ -48,6 +51,8 @@ struct RawEvent {
 struct Event {
     event_type: u32,
     pid: u32,
+    parent_pid: Option<u32>,
+    child_pid: Option<u32>,
     comm: String, 
     // Optional fields based on event type
     filename: Option<String>,
@@ -89,6 +94,8 @@ fn handle_event(data: &[u8]) -> i32 {
         let mut event = Event {
             event_type: raw.event_type,
             pid,
+            parent_pid: None,
+            child_pid: None,
             comm: comm_str,
             filename: None,
             daddr: None,
@@ -120,6 +127,10 @@ fn handle_event(data: &[u8]) -> i32 {
                  } else {
                      warn!("RawNetInfo size exceeds union_data buffer?");
                  }
+            }
+            EVENT_TYPE_FORK => {
+                event.parent_pid = Some(raw.parent_pid);
+                event.child_pid = Some(raw.child_pid);
             }
             _ => {
                 warn!("Received unknown event type: {}", raw.event_type);
