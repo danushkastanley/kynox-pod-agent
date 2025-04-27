@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
+#include <sys/types.h> // Include for pid_t definition
 #include <linux/in.h>
 #include <linux/socket.h>
 #include <linux/bpf.h>
