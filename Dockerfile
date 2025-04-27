@@ -44,5 +44,11 @@ RUN ls -la /workspace/target/release/agent # Verify agent binary exists before r
 
 # Runtime stage (optional minimal image)
 FROM debian:bullseye-slim AS runtime
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libelf1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /workspace/target/release/agent /agent
 ENTRYPOINT /agent # Use shell form
