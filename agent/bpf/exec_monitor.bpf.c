@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
-#include <vmlinux.h> // Include this for kernel types and constants like AF_INET
-#include <linux/types.h>  // For __u32, __u64 etc.
-#include <linux/socket.h> // For AF_INET (kernel version)
-// #include <sys/socket.h> // Removed: Use definition from vmlinux.h
+#include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
+
+// Define constants that might not be in vmlinux.h
+#define TASK_COMM_LEN 16
+#define AF_INET 2
+#define FILENAME_LEN 256
 
 // Define the GPL license
 char LICENSE[] SEC("license") = "GPL";
@@ -19,7 +22,7 @@ struct event {
     __u32 pid;
     char comm[TASK_COMM_LEN];
     union { // Use a union as filename isn't relevant for connect
-        char filename[256];
+        char filename[FILENAME_LEN];
         struct {
             __u32 daddr; // Destination IPv4 address (network byte order)
             __u16 dport; // Destination port (network byte order)
@@ -85,13 +88,11 @@ int handle_openat(struct trace_event_raw_sys_enter *ctx) {
 // Handler for connect syscall
 SEC("tp/syscalls/sys_enter_connect")
 int handle_connect(struct trace_event_raw_sys_enter *ctx) {
-    struct sockaddr *user_addr_ptr = (struct sockaddr *)ctx->args[1];
-    struct sockaddr_in addr = {};
-    struct event *e;
     __u16 family;
-
-    // Read the address family first
-    if (bpf_probe_read_user(&family, sizeof(family), &user_addr_ptr->sa_family) < 0) {
+    struct event *e;
+    
+    // Read the address family first (first 2 bytes of sockaddr)
+    if (bpf_probe_read_user(&family, sizeof(family), (void *)ctx->args[1]) < 0) {
         return 0; // Failed to read family
     }
 
@@ -100,21 +101,21 @@ int handle_connect(struct trace_event_raw_sys_enter *ctx) {
         return 0;
     }
 
-    // Read the full sockaddr_in struct for IPv4
-    if (bpf_probe_read_user(&addr, sizeof(addr), user_addr_ptr) < 0) {
-        return 0; // Failed to read address struct
-    }
-
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
     e->event_type = EVENT_TYPE_CONNECT;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    e->net_info.daddr = addr.sin_addr.s_addr; // Network byte order
-    e->net_info.dport = addr.sin_port;         // Network byte order
-    // Clear filename field for safety (optional, as it's a union)
-    // bpf_probe_read_kernel_str(&e->filename, 1, ""); 
+
+    // Read IPv4 address and port (offset by 2 bytes from family)
+    // sockaddr_in structure: { u16 family; u16 port; u32 addr; u8 zero[8]; }
+    void *addr_ptr = (void *)ctx->args[1];
+    bpf_probe_read_user(&e->net_info.dport, sizeof(e->net_info.dport), addr_ptr + 2);  // port at offset 2
+    bpf_probe_read_user(&e->net_info.daddr, sizeof(e->net_info.daddr), addr_ptr + 4);  // addr at offset 4
+
+    // No need for endian conversion here as we want network byte order
+    // The userspace code will handle the conversion
 
     bpf_ringbuf_submit(e, 0);
     return 0;
