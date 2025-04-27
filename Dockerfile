@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+# Install Rust via rustup and add rustfmt component in the same layer
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
+    /usr/local/cargo/bin/rustup component add rustfmt
 
 # Install eBPF/agent dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,9 +36,6 @@ RUN ln -sf /usr/include/linux /usr/include/linux || true
 
 # Generate vmlinux.h - Removed as it fails in docker build and may not be needed
 # RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > /usr/include/vmlinux.h
-
-# Install rustfmt
-RUN /usr/local/cargo/bin/rustup component add rustfmt
 
 WORKDIR /workspace
 COPY . .
