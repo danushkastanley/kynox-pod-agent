@@ -45,4 +45,4 @@ RUN ls -la /workspace/target/release/agent # Verify agent binary exists before r
 # Runtime stage (optional minimal image)
 FROM debian:bullseye-slim AS runtime
 COPY --from=builder /workspace/target/release/agent /agent
-ENTRYPOINT ["/agent"] # Update entrypoint
+ENTRYPOINT /agent # Use shell form
