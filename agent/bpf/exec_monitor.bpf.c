@@ -4,7 +4,12 @@
 #include <linux/socket.h>
 #include <linux/bpf.h>
 #include <linux/sched.h>
+
+// Define size_t for signal.h
+typedef __kernel_size_t size_t;
+
 #include <linux/signal.h>
+#include <linux/stddef.h>
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -135,7 +140,6 @@ SEC("tp/syscalls/sys_enter_clone")
 int handle_clone(struct trace_event_raw_sys_enter *ctx) {
     struct event *e;
     __u64 pid_tgid;
-    __u32 ppid;
     
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
@@ -145,15 +149,9 @@ int handle_clone(struct trace_event_raw_sys_enter *ctx) {
     e->pid = pid_tgid >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
-    // Get parent process info using task_struct
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (task) {
-        struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-        if (parent) {
-            e->ppid = BPF_CORE_READ(parent, tgid);
-            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
-        }
-    }
+    // Set parent process info
+    e->ppid = 0; // Will be filled by userspace
+    __builtin_memset(e->parent_comm, 0, sizeof(e->parent_comm));
 
     e->event_type = EVENT_TYPE_FORK;
     e->process_info.clone_flags = (__u32)ctx->args[0];
@@ -167,7 +165,6 @@ SEC("tp/syscalls/sys_enter_fork")
 int handle_fork(struct trace_event_raw_sys_enter *ctx) {
     struct event *e;
     __u64 pid_tgid;
-    __u32 ppid;
     
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
@@ -177,15 +174,9 @@ int handle_fork(struct trace_event_raw_sys_enter *ctx) {
     e->pid = pid_tgid >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
-    // Get parent process info using task_struct
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (task) {
-        struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-        if (parent) {
-            e->ppid = BPF_CORE_READ(parent, tgid);
-            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
-        }
-    }
+    // Set parent process info
+    e->ppid = 0; // Will be filled by userspace
+    __builtin_memset(e->parent_comm, 0, sizeof(e->parent_comm));
 
     e->event_type = EVENT_TYPE_FORK;
     e->process_info.clone_flags = 0;
@@ -199,7 +190,6 @@ SEC("tp/syscalls/sys_enter_vfork")
 int handle_vfork(struct trace_event_raw_sys_enter *ctx) {
     struct event *e;
     __u64 pid_tgid;
-    __u32 ppid;
     
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
@@ -209,15 +199,9 @@ int handle_vfork(struct trace_event_raw_sys_enter *ctx) {
     e->pid = pid_tgid >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
-    // Get parent process info using task_struct
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    if (task) {
-        struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-        if (parent) {
-            e->ppid = BPF_CORE_READ(parent, tgid);
-            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
-        }
-    }
+    // Set parent process info
+    e->ppid = 0; // Will be filled by userspace
+    __builtin_memset(e->parent_comm, 0, sizeof(e->parent_comm));
 
     e->event_type = EVENT_TYPE_FORK;
     e->process_info.clone_flags = 0;
