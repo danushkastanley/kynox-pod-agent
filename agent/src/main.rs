@@ -20,6 +20,7 @@ use exec_monitor::*;
 
 const TASK_COMM_LEN: usize = 16;
 const FILENAME_LEN: usize = 256;
+const FS_INFO_LEN: usize = 128;
 
 // Event type constants
 const EVENT_TYPE_EXEC: u32 = 0;
@@ -29,6 +30,8 @@ const EVENT_TYPE_FORK: u32 = 3;
 const EVENT_TYPE_PTRACE: u32 = 4;
 const EVENT_TYPE_SETUID: u32 = 5;
 const EVENT_TYPE_SETGID: u32 = 6;
+const EVENT_TYPE_MOUNT: u32 = 7;
+const EVENT_TYPE_UMOUNT: u32 = 8;
 
 // Event structure that matches our BPF code
 #[repr(C)]
@@ -49,6 +52,8 @@ union EventData {
     ptrace_info: PtraceInfo,
     setuid_info: SetuidInfo,
     setgid_info: SetgidInfo,
+    mount_info: MountInfo,
+    umount_info: UmountInfo,
 }
 
 #[repr(C)]
@@ -77,6 +82,22 @@ struct SetgidInfo {
     gid: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct MountInfo {
+    source: [i8; FS_INFO_LEN],
+    target: [i8; FS_INFO_LEN],
+    fstype: [i8; FS_INFO_LEN],
+    flags: u64, // Use u64 to match unsigned long in BPF
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct UmountInfo {
+    target: [i8; FS_INFO_LEN],
+    flags: i32, // Use i32 to match int in BPF
+}
+
 // User-friendly, serializable event struct for JSON output
 #[derive(Debug, Serialize, Deserialize)]
 struct EventOutput {
@@ -98,6 +119,18 @@ struct EventOutput {
     uid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_fstype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_flags: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    umount_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    umount_flags: Option<i32>,
 }
 
 // Helper function to convert C string to Rust string
@@ -143,6 +176,12 @@ fn handle_event(data: &[u8]) -> i32 {
         ptrace_target_pid: None,
         uid: None,
         gid: None,
+        mount_source: None,
+        mount_target: None,
+        mount_fstype: None,
+        mount_flags: None,
+        umount_target: None,
+        umount_flags: None,
     };
 
     match raw.event_type {
@@ -169,6 +208,18 @@ fn handle_event(data: &[u8]) -> i32 {
         EVENT_TYPE_SETGID => {
             let setgid_info = unsafe { raw.data.setgid_info };
             event.gid = Some(setgid_info.gid);
+        }
+        EVENT_TYPE_MOUNT => {
+            let mount_info = unsafe { raw.data.mount_info };
+            event.mount_source = Some(cstr_to_string(&mount_info.source));
+            event.mount_target = Some(cstr_to_string(&mount_info.target));
+            event.mount_fstype = Some(cstr_to_string(&mount_info.fstype));
+            event.mount_flags = Some(mount_info.flags);
+        }
+        EVENT_TYPE_UMOUNT => {
+            let umount_info = unsafe { raw.data.umount_info };
+            event.umount_target = Some(cstr_to_string(&umount_info.target));
+            event.umount_flags = Some(umount_info.flags);
         }
         _ => {
             warn!("Received unknown event type: {}", raw.event_type);

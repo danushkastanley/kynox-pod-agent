@@ -45,6 +45,7 @@ struct sched_process_fork_args {
 #define TASK_COMM_LEN 16
 #define AF_INET 2
 #define FILENAME_LEN 256
+#define FS_INFO_LEN 128 // Max length for mount/umount related strings
 
 #define EVENT_TYPE_EXEC 0
 #define EVENT_TYPE_OPEN 1
@@ -53,6 +54,8 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_PTRACE 4
 #define EVENT_TYPE_SETUID 5
 #define EVENT_TYPE_SETGID 6
+#define EVENT_TYPE_MOUNT 7
+#define EVENT_TYPE_UMOUNT 8
 
 struct exec_monitor_event {
     __u32 event_type;
@@ -76,6 +79,16 @@ struct exec_monitor_event {
         struct {
             __u32 gid;
         } setgid_info;
+        struct {
+            char source[FS_INFO_LEN];
+            char target[FS_INFO_LEN];
+            char fstype[FS_INFO_LEN];
+            unsigned long flags;
+        } mount_info;
+        struct {
+            char target[FS_INFO_LEN];
+            int flags;
+        } umount_info;
     };
 };
 
@@ -278,6 +291,44 @@ int handle_setgid(struct trace_event_raw_sys_enter *ctx) {
 
     // setgid argument: gid_t gid
     e->setgid_info.gid = (__u32)ctx->args[0];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for mount syscall
+SEC("tp/syscalls/sys_enter_mount")
+int handle_mount(struct trace_event_raw_sys_enter *ctx) {
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+
+    init_event(e, EVENT_TYPE_MOUNT);
+
+    // mount arguments: char *source, char *target, char *filesystemtype, unsigned long mountflags, void *data
+    bpf_probe_read_user_str(&e->mount_info.source, sizeof(e->mount_info.source), (void *)ctx->args[0]);
+    bpf_probe_read_user_str(&e->mount_info.target, sizeof(e->mount_info.target), (void *)ctx->args[1]);
+    bpf_probe_read_user_str(&e->mount_info.fstype, sizeof(e->mount_info.fstype), (void *)ctx->args[2]);
+    e->mount_info.flags = (unsigned long)ctx->args[3];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for umount2 syscall (more common than umount)
+SEC("tp/syscalls/sys_enter_umount2")
+int handle_umount2(struct trace_event_raw_sys_enter *ctx) {
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+
+    init_event(e, EVENT_TYPE_UMOUNT);
+
+    // umount2 arguments: const char *target, int flags
+    bpf_probe_read_user_str(&e->umount_info.target, sizeof(e->umount_info.target), (void *)ctx->args[0]);
+    e->umount_info.flags = (int)ctx->args[1];
 
     submit_event(e);
     return 0;
