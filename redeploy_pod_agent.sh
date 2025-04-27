@@ -11,8 +11,8 @@ K3S_IMAGE_NAME="docker.io/library/${IMAGE_NAME}:${IMAGE_TAG}"
 TEMP_TAR_FILE="${IMAGE_NAME}-${IMAGE_TAG}.tar"
 DAEMONSET_FILE="pod-agent-daemonset.yaml"
 
-echo "--- Building Docker image ${IMAGE_NAME}:${IMAGE_TAG}... ---"
-docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+echo "--- Building Docker image ${IMAGE_NAME}:${IMAGE_TAG} (no-cache)... ---"
+docker build --no-cache -t "${IMAGE_NAME}:${IMAGE_TAG}" .
 
 echo "--- Removing old image from k3s containerd (if exists)... ---"
 sudo k3s ctr images rm "${K3S_IMAGE_NAME}" || echo "Image not found in k3s, continuing..."
@@ -25,6 +25,9 @@ sudo k3s ctr images import "${TEMP_TAR_FILE}"
 
 echo "--- Cleaning up temporary tar file... ---"
 rm "${TEMP_TAR_FILE}"
+
+echo "--- Deleting existing pod-agent pods to force refresh... ---"
+kubectl delete pod -l app=pod-agent --force --grace-period=0 || echo "No pods found to delete, continuing..."
 
 echo "--- Applying Kubernetes DaemonSet ${DAEMONSET_FILE}... ---"
 kubectl apply -f "${DAEMONSET_FILE}"
