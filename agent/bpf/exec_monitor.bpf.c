@@ -51,6 +51,8 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_CONNECT 2
 #define EVENT_TYPE_FORK 3
 #define EVENT_TYPE_PTRACE 4
+#define EVENT_TYPE_SETUID 5
+#define EVENT_TYPE_SETGID 6
 
 struct exec_monitor_event {
     __u32 event_type;
@@ -68,6 +70,12 @@ struct exec_monitor_event {
             long request;
             __u32 target_pid;
         } ptrace_info;
+        struct {
+            __u32 uid;
+        } setuid_info;
+        struct {
+            __u32 gid;
+        } setgid_info;
     };
 };
 
@@ -236,6 +244,40 @@ int handle_ptrace(struct trace_event_raw_sys_enter *ctx) {
     // ptrace arguments: long request, pid_t pid, void *addr, void *data
     e->ptrace_info.request = (long)ctx->args[0];
     e->ptrace_info.target_pid = (__u32)ctx->args[1];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for setuid syscall
+SEC("tp/syscalls/sys_enter_setuid")
+int handle_setuid(struct trace_event_raw_sys_enter *ctx) {
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+
+    init_event(e, EVENT_TYPE_SETUID);
+
+    // setuid argument: uid_t uid
+    e->setuid_info.uid = (__u32)ctx->args[0];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for setgid syscall
+SEC("tp/syscalls/sys_enter_setgid")
+int handle_setgid(struct trace_event_raw_sys_enter *ctx) {
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+
+    init_event(e, EVENT_TYPE_SETGID);
+
+    // setgid argument: gid_t gid
+    e->setgid_info.gid = (__u32)ctx->args[0];
 
     submit_event(e);
     return 0;

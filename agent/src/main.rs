@@ -27,6 +27,8 @@ const EVENT_TYPE_OPEN: u32 = 1;
 const EVENT_TYPE_CONNECT: u32 = 2;
 const EVENT_TYPE_FORK: u32 = 3;
 const EVENT_TYPE_PTRACE: u32 = 4;
+const EVENT_TYPE_SETUID: u32 = 5;
+const EVENT_TYPE_SETGID: u32 = 6;
 
 // Event structure that matches our BPF code
 #[repr(C)]
@@ -45,6 +47,8 @@ union EventData {
     filename: [i8; FILENAME_LEN],
     net_info: NetInfo,
     ptrace_info: PtraceInfo,
+    setuid_info: SetuidInfo,
+    setgid_info: SetgidInfo,
 }
 
 #[repr(C)]
@@ -59,6 +63,18 @@ struct NetInfo {
 struct PtraceInfo {
     request: i64,
     target_pid: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SetuidInfo {
+    uid: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SetgidInfo {
+    gid: u32,
 }
 
 // User-friendly, serializable event struct for JSON output
@@ -78,6 +94,10 @@ struct EventOutput {
     ptrace_request: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ptrace_target_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gid: Option<u32>,
 }
 
 // Helper function to convert C string to Rust string
@@ -121,6 +141,8 @@ fn handle_event(data: &[u8]) -> i32 {
         timestamp,
         ptrace_request: None,
         ptrace_target_pid: None,
+        uid: None,
+        gid: None,
     };
 
     match raw.event_type {
@@ -139,6 +161,14 @@ fn handle_event(data: &[u8]) -> i32 {
             let ptrace_info = unsafe { raw.data.ptrace_info };
             event.ptrace_request = Some(ptrace_info.request);
             event.ptrace_target_pid = Some(ptrace_info.target_pid);
+        }
+        EVENT_TYPE_SETUID => {
+            let setuid_info = unsafe { raw.data.setuid_info };
+            event.uid = Some(setuid_info.uid);
+        }
+        EVENT_TYPE_SETGID => {
+            let setgid_info = unsafe { raw.data.setgid_info };
+            event.gid = Some(setgid_info.gid);
         }
         _ => {
             warn!("Received unknown event type: {}", raw.event_type);
