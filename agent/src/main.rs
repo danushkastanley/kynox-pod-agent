@@ -5,6 +5,7 @@ use libbpf_rs::{RingBufferBuilder, skel::{OpenSkel, Skel, SkelBuilder}};
 use log::{error, info, warn};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
+use libc;
 
 mod exec_monitor {
     include!(concat!(env!("OUT_DIR"), "/exec_monitor.skel.rs"));
@@ -57,7 +58,7 @@ where
     serializer.serialize_str(&c_char_array_to_string(filename))
 }
 
-fn handle_event(_ctx: (), data: &[u8]) -> i32 {
+fn handle_event(data: &[u8]) -> i32 {
     if data.len() < std::mem::size_of::<RawEvent>() {
         warn!("Received data smaller than expected RawEvent size: {} < {}", data.len(), std::mem::size_of::<RawEvent>());
         return 1;
@@ -96,7 +97,7 @@ fn main() -> Result<()> {
     info!("eBPF agent started successfully! Monitoring execve, execveat, open, openat.");
 
     let maps = skel.maps();
-    let rb_map = maps.rb().try_clone()?;
+    let rb_map = maps.rb().clone();
 
     let mut builder = RingBufferBuilder::new();
     builder.add(&rb_map, handle_event)?;
@@ -106,8 +107,8 @@ fn main() -> Result<()> {
     loop {
         match ringbuf.poll(std::time::Duration::from_millis(100)) {
             Ok(_) => {}
-            Err(libbpf_rs::Errno::Errno(libc::EINTR)) => {
-                info!("Poll interrupted, exiting.");
+            Err(libbpf_rs::Error::System(errno)) if errno == libc::EINTR => {
+                info!("Poll interrupted (EINTR), exiting.");
                 break;
             }
             Err(e) => {

@@ -11,6 +11,7 @@ dependencies = [
  "libbpf-cargo",
  "libbpf-rs",
  "libbpf-sys",
+ "libc",
  "log",
  "serde",
  "serde_json",
