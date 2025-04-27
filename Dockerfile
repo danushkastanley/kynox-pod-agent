@@ -32,8 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm || true
 RUN ln -sf /usr/include/linux /usr/include/linux || true
 
-# Generate vmlinux.h
-RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > /usr/include/vmlinux.h
+# Generate vmlinux.h - Removed as it fails in docker build and may not be needed
+# RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > /usr/include/vmlinux.h
 
 # Install rustfmt
 RUN rustup component add rustfmt
