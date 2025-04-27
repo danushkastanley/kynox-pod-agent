@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
+#include <linux/in.h>
 #include <linux/socket.h>
-#include <sys/socket.h>
+#include <linux/bpf.h>
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
+
+// Define tracing structures
+struct trace_event_raw_sys_enter {
+    unsigned long long unused;
+    long syscall_nr;
+    unsigned long args[6];
+};
 
 // Define constants that might not be in vmlinux.h
 #define TASK_COMM_LEN 16
