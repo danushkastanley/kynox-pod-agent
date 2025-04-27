@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
-#include <sys/types.h> // Include for pid_t definition
+// #include <sys/types.h> // Removed as it's not found in the BPF build env
 #include <linux/in.h>
 #include <linux/socket.h>
 #include <linux/bpf.h>
@@ -22,9 +22,9 @@ struct trace_event_raw_sys_enter {
 struct sched_process_fork_args {
     unsigned long long unused;
     char parent_comm[16];
-    pid_t parent_pid;
+    __s32 parent_pid; 
     char child_comm[16];
-    pid_t child_pid;
+    __s32 child_pid;  
 };
 #endif
 
@@ -189,8 +189,8 @@ int handle_fork(struct sched_process_fork_args *ctx) {
     struct event *e;
 
     // Extract parent and child PIDs from the context
-    pid_t parent_pid = ctx->parent_pid;
-    pid_t child_pid = ctx->child_pid;
+    __s32 parent_pid = ctx->parent_pid; 
+    __s32 child_pid = ctx->child_pid;   
 
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
