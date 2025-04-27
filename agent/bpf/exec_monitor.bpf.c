@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
-// #include <sys/types.h> // Removed as it's not found in the BPF build env
 #include <linux/in.h>
 #include <linux/socket.h>
 #include <linux/bpf.h>
@@ -10,64 +9,82 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 
-// Define tracing structures if not fully available via vmlinux.h/BTF
-#ifndef BPF_NO_PRESERVE_ACCESS_INDEX
+// Define basic types if not available
+#ifndef __u8
+typedef unsigned char __u8;
+#endif
+#ifndef __u16
+typedef unsigned short __u16;
+#endif
+#ifndef __u32
+typedef unsigned int __u32;
+#endif
+#ifndef __u64
+typedef unsigned long long __u64;
+#endif
+#ifndef __s32
+typedef signed int __s32;
+#endif
+
+// Define tracing structures if not fully available
 struct trace_event_raw_sys_enter {
     unsigned long long unused;
     long syscall_nr;
     unsigned long args[6];
 };
 
-// Define sched_process_fork tracepoint arguments structure
 struct sched_process_fork_args {
     unsigned long long unused;
     char parent_comm[16];
-    __s32 parent_pid; 
+    __s32 parent_pid;
     char child_comm[16];
-    __s32 child_pid;  
+    __s32 child_pid;
 };
-#endif
 
-// Define constants that might not be in vmlinux.h
+// Define constants
 #define TASK_COMM_LEN 16
-#define AF_INET 2        // Typically defined in linux/socket.h or linux/in.h
+#define AF_INET 2
 #define FILENAME_LEN 256
-
-// Define the GPL license
-char LICENSE[] SEC("license") = "GPL";
 
 #define EVENT_TYPE_EXEC 0
 #define EVENT_TYPE_OPEN 1
 #define EVENT_TYPE_CONNECT 2
-#define EVENT_TYPE_FORK 3 // New event type for fork/clone
+#define EVENT_TYPE_FORK 3
+#define EVENT_TYPE_PTRACE 4
 
-struct event {
-    __u32 event_type; // 0:exec, 1:open/openat, 2:connect, 3:fork/clone
-    __u32 pid;        // PID of the process triggering the event
-    __u32 parent_pid; // Parent PID (for fork events)
-    __u32 child_pid;  // Child PID (for fork events)
+struct exec_monitor_event {
+    __u32 event_type;
+    __u32 pid;
+    __u32 parent_pid;
+    __u32 child_pid;
     char comm[TASK_COMM_LEN];
-    union { // Use a union as filename/net_info aren't relevant for all events
+    union {
         char filename[FILENAME_LEN];
         struct {
-            __u32 daddr; // Destination IPv4 address (network byte order)
-            __u16 dport; // Destination port (network byte order)
+            __u32 daddr;
+            __u16 dport;
         } net_info;
+        struct {
+            long request;
+            __u32 target_pid;
+        } ptrace_info;
     };
 };
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 24);
+    __uint(max_entries, 256 * 1024);
 } rb SEC(".maps");
 
+char LICENSE[] SEC("license") = "GPL";
+
 // Helper to submit an event
-static __always_inline void submit_event(struct event *e) {
+static __always_inline void submit_event(struct exec_monitor_event *e) {
     bpf_ringbuf_submit(e, 0);
 }
 
 // Helper to initialize common event fields
-static __always_inline void init_event(struct event *e, __u32 type) {
+static __always_inline void init_event(struct exec_monitor_event *e, __u32 type) {
     e->event_type = type;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
@@ -83,11 +100,10 @@ static __always_inline void init_event(struct event *e, __u32 type) {
     }
 }
 
-
 // Handler for execve syscall
 SEC("tp/syscalls/sys_enter_execve")
 int handle_execve(struct trace_event_raw_sys_enter *ctx) {
-    struct event *e;
+    struct exec_monitor_event *e;
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
@@ -101,7 +117,7 @@ int handle_execve(struct trace_event_raw_sys_enter *ctx) {
 // Handler for execveat syscall
 SEC("tp/syscalls/sys_enter_execveat")
 int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
-     struct event *e;
+     struct exec_monitor_event *e;
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
@@ -112,11 +128,10 @@ int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
     return 0;
 }
 
-
 // Handler for open syscall
 SEC("tp/syscalls/sys_enter_open")
 int handle_open(struct trace_event_raw_sys_enter *ctx) {
-     struct event *e;
+     struct exec_monitor_event *e;
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
@@ -130,7 +145,7 @@ int handle_open(struct trace_event_raw_sys_enter *ctx) {
 // Handler for openat syscall
 SEC("tp/syscalls/sys_enter_openat")
 int handle_openat(struct trace_event_raw_sys_enter *ctx) {
-     struct event *e;
+     struct exec_monitor_event *e;
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
@@ -141,12 +156,11 @@ int handle_openat(struct trace_event_raw_sys_enter *ctx) {
     return 0;
 }
 
-
 // Handler for connect syscall
 SEC("tp/syscalls/sys_enter_connect")
 int handle_connect(struct trace_event_raw_sys_enter *ctx) {
     __u16 family;
-    struct event *e;
+    struct exec_monitor_event *e;
 
     // Read the address family first (first 2 bytes of sockaddr)
     if (bpf_probe_read_user(&family, sizeof(family), (void *)ctx->args[1]) < 0) {
@@ -186,7 +200,7 @@ int handle_connect(struct trace_event_raw_sys_enter *ctx) {
 // Handler for process fork/clone using sched_process_fork tracepoint
 SEC("tp/sched/sched_process_fork")
 int handle_fork(struct sched_process_fork_args *ctx) {
-    struct event *e;
+    struct exec_monitor_event *e;
 
     // Extract parent and child PIDs from the context
     __s32 parent_pid = ctx->parent_pid; 
@@ -204,6 +218,24 @@ int handle_fork(struct sched_process_fork_args *ctx) {
     e->child_pid = child_pid;
 
     // Comm should be parent's comm, already set by init_event if called in parent's context
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for ptrace syscall
+SEC("tp/syscalls/sys_enter_ptrace")
+int handle_ptrace(struct trace_event_raw_sys_enter *ctx) {
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+
+    init_event(e, EVENT_TYPE_PTRACE);
+
+    // ptrace arguments: long request, pid_t pid, void *addr, void *data
+    e->ptrace_info.request = (long)ctx->args[0];
+    e->ptrace_info.target_pid = (__u32)ctx->args[1];
 
     submit_event(e);
     return 0;

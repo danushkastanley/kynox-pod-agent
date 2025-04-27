@@ -3,14 +3,17 @@ use anyhow::Result;
 use env_logger;
 use libbpf_rs::{RingBufferBuilder, skel::{OpenSkel, Skel, SkelBuilder}};
 use log::{error, info, warn};
-use serde::Serialize;
-use std::mem::MaybeUninit; 
+use serde::{Serialize, Deserialize};
 use std::net::Ipv4Addr; 
 use std::time::{SystemTime, UNIX_EPOCH};
 use libc;
 
+// Include the generated skeleton code
+#[allow(non_upper_case_globals)]
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
 mod exec_monitor {
-    include!(concat!(env!("OUT_DIR"), "/exec_monitor.skel.rs"));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/generated_skel.rs"));
 }
 
 use exec_monitor::*;
@@ -18,137 +21,137 @@ use exec_monitor::*;
 const TASK_COMM_LEN: usize = 16;
 const FILENAME_LEN: usize = 256;
 
-// Event type constants (should match C defines)
+// Event type constants
 const EVENT_TYPE_EXEC: u32 = 0;
 const EVENT_TYPE_OPEN: u32 = 1;
 const EVENT_TYPE_CONNECT: u32 = 2;
 const EVENT_TYPE_FORK: u32 = 3;
+const EVENT_TYPE_PTRACE: u32 = 4;
 
-// Structure to hold raw network info (matching C layout)
-#[derive(Copy, Clone)]
+// Event structure that matches our BPF code
 #[repr(C)]
-struct RawNetInfo {
-    daddr: u32, 
-    dport: u16, 
-}
-
-// Raw event struct matching C layout, including union space
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct RawEvent {
+struct Event {
     event_type: u32,
     pid: u32,
-    comm: [c_char; TASK_COMM_LEN],
-    // Represents the C union { char filename[256]; struct { u32 daddr; u16 dport; } net_info; };
-    // Size is FILENAME_LEN (256) which is larger than RawNetInfo (6)
-    union_data: [u8; FILENAME_LEN],
     parent_pid: u32,
     child_pid: u32,
+    comm: [i8; TASK_COMM_LEN],
+    data: EventData,
 }
 
-// User-friendly, serializable event struct
-#[derive(Debug, Serialize)]
-struct Event {
+#[repr(C)]
+#[derive(Copy, Clone)]
+union EventData {
+    filename: [i8; FILENAME_LEN],
+    net_info: NetInfo,
+    ptrace_info: PtraceInfo,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct NetInfo {
+    daddr: u32,
+    dport: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct PtraceInfo {
+    request: i64,
+    target_pid: u32,
+}
+
+// User-friendly, serializable event struct for JSON output
+#[derive(Debug, Serialize, Deserialize)]
+struct EventOutput {
     event_type: u32,
     pid: u32,
     parent_pid: Option<u32>,
     child_pid: Option<u32>,
-    comm: String, 
-    // Optional fields based on event type
+    comm: String,
     filename: Option<String>,
-    daddr: Option<String>, 
-    dport: Option<u16>,    
+    daddr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dport: Option<u16>,
     timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ptrace_request: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ptrace_target_pid: Option<u32>,
 }
 
-// Helper function stays the same
-fn c_char_array_to_string(arr: &[c_char]) -> String {
-    let bytes: Vec<u8> = arr.iter()
-                          .map(|&c| c as u8)
-                          .take_while(|&b| b != 0)
-                          .collect();
+// Helper function to convert C string to Rust string
+fn cstr_to_string(cstr: &[i8]) -> String {
+    let bytes: Vec<u8> = cstr
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
     String::from_utf8_lossy(&bytes).to_string()
 }
 
 fn handle_event(data: &[u8]) -> i32 {
-    if data.len() < std::mem::size_of::<RawEvent>() {
-        warn!("Received data smaller than expected RawEvent size: {} < {}", data.len(), std::mem::size_of::<RawEvent>());
+    if data.len() != std::mem::size_of::<Event>() {
+        warn!(
+            "Received data size mismatch: {} bytes, expected {}",
+            data.len(),
+            std::mem::size_of::<Event>()
+        );
         return 1;
     }
 
-    // Create an uninitialized RawEvent to copy data into safely
-    let mut raw_event_uninit: MaybeUninit<RawEvent> = MaybeUninit::uninit();
-    // SAFETY: We checked the size, and we're copying from a slice provided by the kernel/libbpf.
-    // The pointer is valid for the size of RawEvent.
-    unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), raw_event_uninit.as_mut_ptr() as *mut u8, std::mem::size_of::<RawEvent>());
-        // Now assume it's initialized
-        let raw = raw_event_uninit.assume_init();
+    let raw: &Event = unsafe {
+        &*(data.as_ptr() as *const Event)
+    };
 
-        // Common fields
-        let pid = raw.pid;
-        // Convert comm directly here
-        let comm_str = c_char_array_to_string(&raw.comm);
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
 
-        let mut event = Event {
-            event_type: raw.event_type,
-            pid,
-            parent_pid: None,
-            child_pid: None,
-            comm: comm_str,
-            filename: None,
-            daddr: None,
-            dport: None,
-            timestamp,
-        };
+    let mut event = EventOutput {
+        event_type: raw.event_type,
+        pid: raw.pid,
+        parent_pid: Some(raw.parent_pid),
+        child_pid: Some(raw.child_pid),
+        comm: cstr_to_string(&raw.comm),
+        filename: None,
+        daddr: None,
+        dport: None,
+        timestamp,
+        ptrace_request: None,
+        ptrace_target_pid: None,
+    };
 
-        // Process union data based on event type
-        match raw.event_type {
-            EVENT_TYPE_EXEC | EVENT_TYPE_OPEN => {
-                // Treat union_data as filename (c_char array)
-                // SAFETY: We assume BPF program wrote filename for these types.
-                // Need to cast the [u8] slice to a pointer of the correct c_char array type.
-                let filename_ptr = raw.union_data.as_ptr() as *const [c_char; FILENAME_LEN];
-                event.filename = Some(c_char_array_to_string(&*filename_ptr));
-            }
-            EVENT_TYPE_CONNECT => {
-                 // Treat start of union_data as RawNetInfo
-                 // SAFETY: We assume BPF program wrote net_info for this type.
-                 // Ensure we don't read past the bounds of union_data (RawNetInfo is smaller).
-                 if FILENAME_LEN >= std::mem::size_of::<RawNetInfo>() {
-                    let net_info_ptr = raw.union_data.as_ptr() as *const RawNetInfo;
-                    let net_info = *net_info_ptr;
-                    // Convert IP and port from network byte order to host format
-                    let ip_addr = Ipv4Addr::from(u32::from_be(net_info.daddr)); 
-                    let port = u16::from_be(net_info.dport); 
-                    event.daddr = Some(ip_addr.to_string());
-                    event.dport = Some(port);
-                 } else {
-                     warn!("RawNetInfo size exceeds union_data buffer?");
-                 }
-            }
-            EVENT_TYPE_FORK => {
-                event.parent_pid = Some(raw.parent_pid);
-                event.child_pid = Some(raw.child_pid);
-            }
-            _ => {
-                warn!("Received unknown event type: {}", raw.event_type);
-            }
+    match raw.event_type {
+        EVENT_TYPE_EXEC | EVENT_TYPE_OPEN => {
+            let filename_bytes = unsafe { raw.data.filename };
+            event.filename = Some(cstr_to_string(&filename_bytes));
         }
-
-        // Serialize and print the user-friendly Event struct
-        match serde_json::to_string(&event) {
-            Ok(json) => {
-                println!("{}", json);
-            }
-            Err(e) => {
-                error!("Failed to serialize event to JSON: {}", e);
-            }
+        EVENT_TYPE_CONNECT => {
+            let net_info = unsafe { raw.data.net_info };
+            let daddr = Ipv4Addr::from(u32::from_be(net_info.daddr));
+            let dport = u16::from_be(net_info.dport);
+            event.daddr = Some(daddr.to_string());
+            event.dport = Some(dport);
+        }
+        EVENT_TYPE_PTRACE => {
+            let ptrace_info = unsafe { raw.data.ptrace_info };
+            event.ptrace_request = Some(ptrace_info.request);
+            event.ptrace_target_pid = Some(ptrace_info.target_pid);
+        }
+        _ => {
+            warn!("Received unknown event type: {}", raw.event_type);
+            return 1;
         }
     }
 
-    0 
+    match serde_json::to_string(&event) {
+        Ok(json) => println!("{}", json),
+        Err(e) => warn!("Failed to serialize event to JSON: {} - Event: {:?}", e, event),
+    }
+
+    0
 }
 
 fn main() -> Result<()> {
