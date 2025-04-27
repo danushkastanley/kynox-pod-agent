@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <vmlinux.h> // Include this for kernel types and constants like AF_INET
+#include <linux/types.h>  // For __u32, __u64 etc.
+#include <linux/socket.h> // For AF_INET (kernel version)
 // #include <sys/socket.h> // Removed: Use definition from vmlinux.h
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
