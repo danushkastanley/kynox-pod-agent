@@ -41,6 +41,9 @@ RUN ln -sf /usr/include/linux /usr/include/linux || true
 WORKDIR /workspace
 COPY . .
 
+# Copy pre-generated vmlinux.h from host
+COPY vmlinux.h /usr/include/vmlinux.h
+
 # Build agent (compiles BPF + user-space)
 WORKDIR /workspace/agent
 RUN pwd
