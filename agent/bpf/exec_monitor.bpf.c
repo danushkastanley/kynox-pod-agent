@@ -147,10 +147,12 @@ int handle_clone(struct trace_event_raw_sys_enter *ctx) {
     // Get current process info
     pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid >> 32;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    if (bpf_get_current_comm(&e->comm, sizeof(e->comm)) != 0) {
+        e->comm[0] = '\0';
+    }
 
     // Set parent process info
-    e->ppid = 0; // Will be filled by userspace
+    e->ppid = pid_tgid & 0xFFFFFFFF; // Lower 32 bits contain TGID (thread group ID)
     __builtin_memset(e->parent_comm, 0, sizeof(e->parent_comm));
 
     e->event_type = EVENT_TYPE_FORK;
@@ -172,10 +174,12 @@ int handle_fork(struct trace_event_raw_sys_enter *ctx) {
     // Get current process info
     pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid >> 32;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    if (bpf_get_current_comm(&e->comm, sizeof(e->comm)) != 0) {
+        e->comm[0] = '\0';
+    }
 
     // Set parent process info
-    e->ppid = 0; // Will be filled by userspace
+    e->ppid = pid_tgid & 0xFFFFFFFF; // Lower 32 bits contain TGID (thread group ID)
     __builtin_memset(e->parent_comm, 0, sizeof(e->parent_comm));
 
     e->event_type = EVENT_TYPE_FORK;
@@ -197,10 +201,12 @@ int handle_vfork(struct trace_event_raw_sys_enter *ctx) {
     // Get current process info
     pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid >> 32;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    if (bpf_get_current_comm(&e->comm, sizeof(e->comm)) != 0) {
+        e->comm[0] = '\0';
+    }
 
     // Set parent process info
-    e->ppid = 0; // Will be filled by userspace
+    e->ppid = pid_tgid & 0xFFFFFFFF; // Lower 32 bits contain TGID (thread group ID)
     __builtin_memset(e->parent_comm, 0, sizeof(e->parent_comm));
 
     e->event_type = EVENT_TYPE_FORK;
