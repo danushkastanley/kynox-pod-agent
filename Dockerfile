@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     build-essential \
+    libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup
