@@ -3,6 +3,8 @@
 #include <linux/in.h>
 #include <linux/socket.h>
 #include <linux/bpf.h>
+#include <linux/sched.h>
+#include <linux/signal.h>
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -133,22 +135,23 @@ SEC("tp/syscalls/sys_enter_clone")
 int handle_clone(struct trace_event_raw_sys_enter *ctx) {
     struct event *e;
     __u64 pid_tgid;
-    __u64 ppid;
+    __u32 ppid;
     
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
+    // Get current process info
     pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
-    ppid = bpf_get_current_ppid_tgid();
-    e->ppid = ppid >> 32;
-    struct task_struct *parent = (struct task_struct *)bpf_get_current_task();
-    if (parent) {
-        struct task_struct *real_parent = BPF_CORE_READ(parent, real_parent);
-        if (real_parent) {
-            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &real_parent->comm);
+    // Get parent process info using task_struct
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (task) {
+        struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+        if (parent) {
+            e->ppid = BPF_CORE_READ(parent, tgid);
+            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
         }
     }
 
@@ -164,28 +167,29 @@ SEC("tp/syscalls/sys_enter_fork")
 int handle_fork(struct trace_event_raw_sys_enter *ctx) {
     struct event *e;
     __u64 pid_tgid;
-    __u64 ppid;
+    __u32 ppid;
     
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
+    // Get current process info
     pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
-    ppid = bpf_get_current_ppid_tgid();
-    e->ppid = ppid >> 32;
-    struct task_struct *parent = (struct task_struct *)bpf_get_current_task();
-    if (parent) {
-        struct task_struct *real_parent = BPF_CORE_READ(parent, real_parent);
-        if (real_parent) {
-            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &real_parent->comm);
+    // Get parent process info using task_struct
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (task) {
+        struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+        if (parent) {
+            e->ppid = BPF_CORE_READ(parent, tgid);
+            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
         }
     }
 
     e->event_type = EVENT_TYPE_FORK;
     e->process_info.clone_flags = 0;
-    e->process_info.exit_signal = SIGCHLD;
+    e->process_info.exit_signal = 17; // SIGCHLD value
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -195,28 +199,29 @@ SEC("tp/syscalls/sys_enter_vfork")
 int handle_vfork(struct trace_event_raw_sys_enter *ctx) {
     struct event *e;
     __u64 pid_tgid;
-    __u64 ppid;
+    __u32 ppid;
     
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
 
+    // Get current process info
     pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid >> 32;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
-    ppid = bpf_get_current_ppid_tgid();
-    e->ppid = ppid >> 32;
-    struct task_struct *parent = (struct task_struct *)bpf_get_current_task();
-    if (parent) {
-        struct task_struct *real_parent = BPF_CORE_READ(parent, real_parent);
-        if (real_parent) {
-            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &real_parent->comm);
+    // Get parent process info using task_struct
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    if (task) {
+        struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+        if (parent) {
+            e->ppid = BPF_CORE_READ(parent, tgid);
+            bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
         }
     }
 
     e->event_type = EVENT_TYPE_FORK;
     e->process_info.clone_flags = 0;
-    e->process_info.exit_signal = SIGCHLD;
+    e->process_info.exit_signal = 17; // SIGCHLD value
 
     bpf_ringbuf_submit(e, 0);
     return 0;
