@@ -317,6 +317,7 @@ int handle_mount(struct trace_event_raw_sys_enter *ctx) {
 }
 
 // Handler for umount2 syscall (more common than umount)
+/*
 SEC("tp/syscalls/sys_enter_umount2")
 int handle_umount2(struct trace_event_raw_sys_enter *ctx) {
     struct exec_monitor_event *e;
@@ -333,3 +334,4 @@ int handle_umount2(struct trace_event_raw_sys_enter *ctx) {
     submit_event(e);
     return 0;
 }
+*/

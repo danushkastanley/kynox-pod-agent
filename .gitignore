@@ -27,3 +27,4 @@ target/
 # eBPF specific
 *.o
 *.ll
+*.oci.tar
