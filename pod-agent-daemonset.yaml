@@ -20,7 +20,7 @@ spec:
       - name: pod-agent 
         # --- Use local image ---
         image: pod-agent:latest         # Use local tag
-        imagePullPolicy: IfNotPresent # Use local image
+        imagePullPolicy: Never        # Use local image ONLY
         # --- End image config ---
         securityContext:
           privileged: true              # Needed for eBPF kernel access
