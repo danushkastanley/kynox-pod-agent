@@ -37,28 +37,32 @@ RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm || true
 RUN ln -sf /usr/include/linux /usr/include/linux || true
 
 WORKDIR /workspace
-COPY . .
 
-# Create output directory for BPF skeleton
-RUN mkdir -p /workspace/agent/src/bpf
+# --- Optimized Build Steps ---
 
-# Copy vmlinux.h to the include path
-COPY vmlinux.h /usr/include/vmlinux.h
+# 1. Copy manifests and create dummy src for dependency build
+COPY ./Cargo.toml ./Cargo.lock /workspace/
+COPY ./agent/Cargo.toml /workspace/agent/
+WORKDIR /workspace
+RUN mkdir -p agent/src && echo "fn main() {}" > agent/src/main.rs
 
-# Build agent (compiles BPF + user-space)
+# 2. Build *only* dependencies
 WORKDIR /workspace/agent
-RUN pwd
-RUN ls -l /workspace/agent
+# Ensure target directory exists for caching
+RUN cargo fetch # Downloads deps but doesn't build them initially
+RUN cargo build --release --bin agent || true # Build deps, ignore error if main doesn't exist yet (it does now)
+
+# 3. Copy the actual source code
+WORKDIR /workspace
+COPY ./agent/src/ ./agent/src/
+COPY ./agent/bpf/ ./agent/bpf/
+COPY ./agent/build.rs ./agent/
+COPY ./vmlinux.h /usr/include/
+
+# 4. Build the final binary (will reuse dependency cache)
+WORKDIR /workspace/agent
 ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu
-
-# Debug: Run cargo build directly first to see skeleton generation
-RUN cargo build
-RUN ls -la /workspace/agent/src/bpf/
-RUN cat /workspace/agent/src/bpf/generated_skel.rs || true
-
-# Then try the release build
-RUN cargo build --release
-RUN ls -la /workspace/target/release/agent # Verify agent binary exists before runtime stage
+RUN cargo build --release --bin agent
 
 # Runtime stage (optional minimal image)
 FROM ubuntu:22.04 AS runtime
@@ -70,6 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /workspace/target/release/agent /agent
-COPY --from=builder /usr/include/vmlinux.h /usr/include/vmlinux.h
+# Copy vmlinux.h (only if strictly needed at runtime - unlikely with libbpf)
+COPY --from=builder /usr/include/vmlinux.h /usr/include/
 
 ENTRYPOINT ["/agent"]

@@ -24,7 +24,6 @@ DAEMONSET_YAML="pod-agent-daemonset.yaml"
 echo "🛠️  (1/6) Building ${FULL_REF} to OCI tarball…"
 docker buildx build \
   --progress=plain \
-  --no-cache \
   --tag "${FULL_REF}" \
   --output "type=oci,dest=${TAR_FILE}" \
   .
