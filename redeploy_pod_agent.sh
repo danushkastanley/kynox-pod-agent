@@ -1,35 +1,52 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Safe redeploy script for the pod-agent DaemonSet on a k3s node
+# ──────────────────────────────────────────────────────────────
+# • Builds the image straight into an OCI tarball (no layers left in /var/lib/docker)
+# • Imports that tarball into k3s’ containerd
+# • Prunes old images/layers in both Docker and containerd
+# • Restarts the DaemonSet cleanly
+# • Leaves root disk clean and predictable
+#
+# Requirements: Docker Buildx (Docker ≥ 20.10), k3s with ctr/crictl on PATH
+#               Run as a user that can sudo (for ctr/crictl).
+set -euo pipefail
+IFS=$'\n\t'
 
-# Script to rebuild, import, and redeploy the pod-agent
-# Run this script from the pod-agent directory on the Ubuntu machine
-
-set -e # Exit immediately if a command exits with a non-zero status.
-
+# ─── Configuration ──────────────────────────────────────────────────────────────
 IMAGE_NAME="pod-agent"
-IMAGE_TAG="latest"
-K3S_IMAGE_NAME="docker.io/library/${IMAGE_NAME}:${IMAGE_TAG}"
-TEMP_TAR_FILE="${IMAGE_NAME}-${IMAGE_TAG}.tar"
-DAEMONSET_FILE="pod-agent-daemonset.yaml"
+IMAGE_TAG="latest"                     # change to a version if you want history
+FULL_REF="docker.io/library/${IMAGE_NAME}:${IMAGE_TAG}"
+TAR_FILE="${IMAGE_NAME}.oci.tar"       # lives only for a few seconds
+DAEMONSET_YAML="pod-agent-daemonset.yaml"
 
-echo "--- Building Docker image ${IMAGE_NAME}:${IMAGE_TAG} (no-cache)... ---"
-docker build --no-cache -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+# ─── Build image → OCI tarball only (skips Docker's local image store) ─────────
+echo "🛠️  (1/6) Building ${FULL_REF} to OCI tarball…"
+docker buildx build \
+  --progress=plain \
+  --no-cache \
+  --tag "${FULL_REF}" \
+  --output "type=oci,dest=${TAR_FILE}" \
+  .
 
-echo "--- Removing old image from k3s containerd (if exists)... ---"
-sudo k3s ctr images rm "${K3S_IMAGE_NAME}" || echo "Image not found in k3s, continuing..."
+# ─── Remove *all* dangling data from Docker (no layers kept) ───────────────────
+echo "🧹 (2/6) Docker: pruning unused objects…"
+docker system prune -af --volumes
 
-echo "--- Exporting image ${IMAGE_NAME}:${IMAGE_TAG} from Docker... ---"
-docker save "${IMAGE_NAME}:${IMAGE_TAG}" -o "${TEMP_TAR_FILE}"
+# ─── Import the tarball into containerd & drop the tar ─────────────────────────
+echo "📦 (3/6) Importing image into k3s containerd…"
+sudo k3s ctr images import "${TAR_FILE}"
+rm -f "${TAR_FILE}"
 
-echo "--- Importing image into k3s containerd... ---"
-sudo k3s ctr images import "${TEMP_TAR_FILE}"
+# ─── Prune unused / old images in containerd (keeps ones in use) ───────────────
+echo "🧹 (4/6) containerd: pruning unused images…"
+sudo k3s crictl rmi --prune
 
-echo "--- Cleaning up temporary tar file... ---"
-rm "${TEMP_TAR_FILE}"
+# ─── Restart the DaemonSet (delete pods; controller recreates) ─────────────────
+echo "🔄 (5/6) Forcing pod refresh…"
+kubectl delete pod -l "app=${IMAGE_NAME}" --force --grace-period=0 --ignore-not-found
 
-echo "--- Deleting existing pod-agent pods to force refresh... ---"
-kubectl delete pod -l app=pod-agent --force --grace-period=0 || echo "No pods found to delete, continuing..."
+echo "🚀 (6/6) Applying ${DAEMONSET_YAML}…"
+kubectl apply -f "${DAEMONSET_YAML}"
 
-echo "--- Applying Kubernetes DaemonSet ${DAEMONSET_FILE}... ---"
-kubectl apply -f "${DAEMONSET_FILE}"
-
-echo "--- Done. Monitor pod status with: kubectl get pods -l app=pod-agent -w ---"
+echo "✅ Done!   Follow rollout with:  kubectl get pods -l app=${IMAGE_NAME} -w"
