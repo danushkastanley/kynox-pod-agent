@@ -14,11 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf-dev \
     libbpf-dev \
     pkg-config \
-    linux-headers-$(uname -r) \
+    linux-headers-generic \
     linux-libc-dev \
     linux-tools-common \
     linux-tools-generic \
-    linux-tools-$(uname -r) \
     zlib1g-dev \
     libz-dev \
     git \
@@ -33,7 +32,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
     BPF_CLANG=clang-14 \
-    BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu -I/usr/include/linux" \
+    BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu -I/usr/include/linux -I/usr/include/asm" \
     TMPDIR=/tmp
 
 # Install Rust via rustup and add rustfmt component in the same layer
@@ -43,10 +42,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 # Ensure proper temporary directory permissions
 RUN mkdir -p /tmp && chmod 1777 /tmp
 
-# Link headers (might still be needed depending on include paths)
-RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm || true && \
-    ln -sf /usr/include/linux /usr/include/linux || true && \
-    ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so
+# Set up kernel headers and symlinks
+RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
+    ln -sf /usr/include/linux /usr/include/linux && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so && \
+    mkdir -p /usr/src/linux/tools/lib/bpf && \
+    touch /usr/src/linux/tools/lib/bpf/libbpf.a
 
 WORKDIR /workspace
 
