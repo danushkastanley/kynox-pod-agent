@@ -14,10 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf-dev \
     libbpf-dev \
     pkg-config \
-    linux-headers-generic \
+    linux-headers-$(uname -r) \
     linux-libc-dev \
-    git \
+    linux-tools-common \
     linux-tools-generic \
+    linux-tools-$(uname -r) \
+    zlib1g-dev \
+    libz-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up clang-14 as the default
@@ -27,14 +31,22 @@ RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 && 
 # Install Rust via rustup
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+    PATH=/usr/local/cargo/bin:$PATH \
+    BPF_CLANG=clang-14 \
+    BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu -I/usr/include/linux" \
+    TMPDIR=/tmp
+
 # Install Rust via rustup and add rustfmt component in the same layer
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
     /usr/local/cargo/bin/rustup component add rustfmt
 
+# Ensure proper temporary directory permissions
+RUN mkdir -p /tmp && chmod 1777 /tmp
+
 # Link headers (might still be needed depending on include paths)
-RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm || true
-RUN ln -sf /usr/include/linux /usr/include/linux || true
+RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm || true && \
+    ln -sf /usr/include/linux /usr/include/linux || true && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so
 
 WORKDIR /workspace
 
