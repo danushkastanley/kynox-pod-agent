@@ -41,8 +41,8 @@ fi
 rm -f "${TAR_FILE}"
 
 # ─── Prune unused / old images in containerd (keeps ones in use) ───────────────
-echo "🧹 (4/6) containerd: pruning unused images…"
-sudo k3s crictl rmi --prune
+echo "🧹 (4/6) containerd: pruning unused images..."
+# sudo k3s crictl rmi --prune # <<< Commented out - seems too aggressive
 
 # ─── Restart the DaemonSet (delete pods; controller recreates) ─────────────────
 echo "🔄 (5/6) Forcing pod refresh…"
