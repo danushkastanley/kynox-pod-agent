@@ -34,6 +34,15 @@ const EVENT_TYPE_MOUNT: u32 = 7;
 const EVENT_TYPE_UMOUNT: u32 = 8;
 const EVENT_TYPE_CAPSET: u32 = 9;
 const EVENT_TYPE_BPF_PROG: u32 = 10;
+const EVENT_TYPE_SECCOMP: u32 = 11;
+
+// Seccomp-related constants for human-readable output
+const PR_SET_SECCOMP: u32 = 22;
+const PR_GET_SECCOMP: u32 = 21;
+const SECCOMP_MODE_STRICT: u32 = 1;
+const SECCOMP_MODE_FILTER: u32 = 2;
+const SECCOMP_SET_MODE_STRICT: u32 = 0;
+const SECCOMP_SET_MODE_FILTER: u32 = 1;
 
 // Event structure that matches our BPF code
 #[repr(C)]
@@ -58,6 +67,7 @@ union EventData {
     umount_info: UmountInfo,
     capset_info: CapsetInfo,
     bpf_prog_info: BpfProgInfo,
+    seccomp_info: SeccompInfo,
 }
 
 #[repr(C)]
@@ -119,6 +129,15 @@ struct BpfProgInfo {
     license: [i8; 64],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SeccompInfo {
+    operation: u32,
+    option: u32,
+    mode: u32,
+    flags: u32,
+}
+
 // User-friendly, serializable event struct for JSON output
 #[derive(Debug, Serialize, Deserialize)]
 struct EventOutput {
@@ -164,6 +183,14 @@ struct EventOutput {
     bpf_insn_cnt: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bpf_license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seccomp_operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seccomp_option: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seccomp_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seccomp_flags: Option<u32>,
 }
 
 // Helper function to convert C string to Rust string
@@ -221,6 +248,10 @@ fn handle_event(data: &[u8]) -> i32 {
         bpf_prog_type: None,
         bpf_insn_cnt: None,
         bpf_license: None,
+        seccomp_operation: None,
+        seccomp_option: None,
+        seccomp_mode: None,
+        seccomp_flags: None,
     };
 
     match raw.event_type {
@@ -276,6 +307,35 @@ fn handle_event(data: &[u8]) -> i32 {
             if bpf_info.license_len > 0 {
                 event.bpf_license = Some(cstr_to_string(&bpf_info.license));
             }
+        }
+        EVENT_TYPE_SECCOMP => {
+            let seccomp_info = unsafe { raw.data.seccomp_info };
+            
+            // Convert operation to human-readable string
+            event.seccomp_operation = Some(match seccomp_info.operation {
+                1 => "prctl".to_string(),
+                2 => "seccomp".to_string(),
+                _ => format!("unknown({})", seccomp_info.operation),
+            });
+
+            // Convert option to human-readable string
+            event.seccomp_option = Some(match seccomp_info.option {
+                PR_SET_SECCOMP => "PR_SET_SECCOMP".to_string(),
+                PR_GET_SECCOMP => "PR_GET_SECCOMP".to_string(),
+                SECCOMP_SET_MODE_STRICT => "SECCOMP_SET_MODE_STRICT".to_string(),
+                SECCOMP_SET_MODE_FILTER => "SECCOMP_SET_MODE_FILTER".to_string(),
+                _ => format!("unknown({})", seccomp_info.option),
+            });
+
+            // Convert mode to human-readable string
+            event.seccomp_mode = Some(match seccomp_info.mode {
+                SECCOMP_MODE_STRICT => "SECCOMP_MODE_STRICT".to_string(),
+                SECCOMP_MODE_FILTER => "SECCOMP_MODE_FILTER".to_string(),
+                0 => "none".to_string(),
+                _ => format!("unknown({})", seccomp_info.mode),
+            });
+
+            event.seccomp_flags = Some(seccomp_info.flags);
         }
         _ => {
             warn!("Received unknown event type: {}", raw.event_type);

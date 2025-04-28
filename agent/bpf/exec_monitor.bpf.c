@@ -58,6 +58,16 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_UMOUNT 8
 #define EVENT_TYPE_CAPSET 9
 #define EVENT_TYPE_BPF_PROG 10
+#define EVENT_TYPE_SECCOMP 11
+
+// Define seccomp-related constants
+#define PR_SET_SECCOMP 22
+#define PR_GET_SECCOMP 21
+#define SECCOMP_MODE_STRICT 1
+#define SECCOMP_MODE_FILTER 2
+#define SECCOMP_SET_MODE_STRICT 0
+#define SECCOMP_SET_MODE_FILTER 1
+#define SECCOMP_GET_ACTION_AVAIL 2
 
 struct exec_monitor_event {
     __u32 event_type;
@@ -96,12 +106,18 @@ struct exec_monitor_event {
             __u32 pid;
         } capset_info;
         struct {
-            __u32 cmd;           // BPF command (e.g., BPF_PROG_LOAD)
-            __u32 prog_type;     // Type of BPF program being loaded
-            __u32 insn_cnt;      // Number of BPF instructions
-            __u32 license_len;   // Length of license string
-            char license[64];    // License string (truncated if needed)
+            __u32 cmd;
+            __u32 prog_type;
+            __u32 insn_cnt;
+            __u32 license_len;
+            char license[64];
         } bpf_prog_info;
+        struct {
+            __u32 operation;     // prctl or seccomp syscall
+            __u32 option;        // Option/command being used
+            __u32 mode;          // Seccomp mode being set
+            __u32 flags;         // Additional flags
+        } seccomp_info;
     };
 };
 
@@ -412,6 +428,71 @@ int handle_bpf(struct trace_event_raw_sys_enter *ctx)
         } else {
             e->bpf_prog_info.license_len = 0;
         }
+    }
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for prctl syscall to monitor seccomp changes
+SEC("tp/syscalls/sys_enter_prctl")
+int handle_prctl(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+    int option = (int)ctx->args[0];
+
+    // We're only interested in seccomp-related prctl calls
+    if (option != PR_SET_SECCOMP && option != PR_GET_SECCOMP) {
+        return 0;
+    }
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_SECCOMP);
+    
+    e->seccomp_info.operation = 1; // 1 for prctl
+    e->seccomp_info.option = option;
+    
+    if (option == PR_SET_SECCOMP) {
+        e->seccomp_info.mode = (unsigned int)ctx->args[1];
+        e->seccomp_info.flags = 0;
+    } else {
+        e->seccomp_info.mode = 0;
+        e->seccomp_info.flags = 0;
+    }
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for seccomp syscall
+SEC("tp/syscalls/sys_enter_seccomp")
+int handle_seccomp(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+    unsigned int operation = (unsigned int)ctx->args[0];
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_SECCOMP);
+    
+    e->seccomp_info.operation = 2; // 2 for seccomp syscall
+    e->seccomp_info.option = operation;
+    e->seccomp_info.flags = (unsigned int)ctx->args[1];
+    
+    if (operation == SECCOMP_SET_MODE_FILTER) {
+        // For SECCOMP_SET_MODE_FILTER, args[2] points to struct sock_fprog
+        e->seccomp_info.mode = SECCOMP_MODE_FILTER;
+    } else if (operation == SECCOMP_SET_MODE_STRICT) {
+        e->seccomp_info.mode = SECCOMP_MODE_STRICT;
+    } else {
+        e->seccomp_info.mode = 0;
     }
 
     submit_event(e);
