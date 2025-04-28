@@ -20,11 +20,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BPF_CLANG");
     println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
 
-    // Build and generate skeleton
-    let builder = SkeletonBuilder::new()
-        .source(&bpf_src);
+    // Create a new builder instance that lives long enough
+    let mut builder = SkeletonBuilder::new();
+    builder.source(&bpf_src);
 
-    // If we have custom clang, use it
+    // Configure clang if specified
     if let Ok(clang) = env::var("BPF_CLANG") {
         builder.clang(&clang);
     }
