@@ -33,8 +33,11 @@ echo "🧹 (2/6) Docker: pruning unused objects…"
 docker system prune -af --volumes
 
 # ─── Import the tarball into containerd & drop the tar ─────────────────────────
-echo "📦 (3/6) Importing image into k3s containerd…"
-sudo k3s ctr images import "${TAR_FILE}"
+echo "💾 (3/6) Importing image into k3s containerd..."
+sudo k3s ctr --namespace k8s.io images import "${TAR_FILE}"
+if [ $? -ne 0 ]; then
+    echo "❌ Image import failed!"
+fi
 rm -f "${TAR_FILE}"
 
 # ─── Prune unused / old images in containerd (keeps ones in use) ───────────────
