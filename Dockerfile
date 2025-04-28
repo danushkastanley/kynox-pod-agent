@@ -64,53 +64,37 @@ RUN mkdir -p /tmp && chmod 1777 /tmp && \
     ln -sf /usr/include/linux /usr/include/linux && \
     ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so
 
-# Create necessary directories for BPF maps
-RUN mkdir -p /sys/fs/bpf && \
-    mkdir -p /sys/kernel/debug/tracing
-
 WORKDIR /workspace
 
-# --- Optimized Build Steps ---
+# Copy only necessary files for building
+COPY Cargo.toml Cargo.lock ./
+COPY agent/Cargo.toml agent/
+COPY agent-core/Cargo.toml agent-core/
 
-# 1. Copy manifests and create dummy src for dependency build
-COPY ./Cargo.toml ./Cargo.lock /workspace/
-COPY ./agent/Cargo.toml /workspace/agent/
-COPY ./agent-core/Cargo.toml /workspace/agent-core/
-WORKDIR /workspace
-RUN mkdir -p agent/src agent-core/src && echo "fn main() {}" > agent/src/main.rs && echo "pub fn dummy() {}" > agent-core/src/lib.rs
+# Create dummy source files for dependencies caching
+RUN mkdir -p agent/src agent-core/src && \
+    touch agent/src/lib.rs agent-core/src/lib.rs && \
+    cargo build --release
 
-# 2. Build *only* dependencies
-WORKDIR /workspace/agent
-# Ensure target directory exists for caching
-RUN cargo fetch # Downloads deps but doesn't build them initially
-RUN cargo build --release --bin agent || true # Build deps, ignore error if main doesn't exist yet (it does now)
+# Copy actual source files
+COPY . .
 
-# 3. Copy the actual source code
-WORKDIR /workspace
-COPY ./agent/src/ ./agent/src/
-COPY ./agent/bpf/ ./agent/bpf/
-COPY ./agent/build.rs ./agent/
-COPY ./agent-core/src/ ./agent-core/src/
-COPY ./agent-core/bpf/ ./agent-core/bpf/
-COPY ./agent-core/build.rs ./agent-core/
-COPY ./vmlinux.h /usr/include/
-
-# 4. Build the final binary (will reuse dependency cache)
-WORKDIR /workspace/agent
+# Build the agent
 ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu
 RUN cargo build --release --bin agent
 
-# Runtime stage (optional minimal image)
-FROM ubuntu:22.04 AS runtime
+# Runtime stage
+FROM ubuntu:22.04
 
-# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf1 \
-    ca-certificates \
+    libbpf0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /workspace/target/release/agent /agent
-# Copy vmlinux.h (only if strictly needed at runtime - unlikely with libbpf)
-COPY --from=builder /usr/include/vmlinux.h /usr/include/
+COPY --from=builder /workspace/target/release/agent /usr/local/bin/
 
-ENTRYPOINT ["/agent"]
+# Create mount points for BPF filesystems
+# These will be mounted at runtime with proper permissions
+VOLUME ["/sys/fs/bpf", "/sys/kernel/debug"]
+
+ENTRYPOINT ["/usr/local/bin/agent"]
