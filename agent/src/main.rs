@@ -35,6 +35,9 @@ const EVENT_TYPE_UMOUNT: u32 = 8;
 const EVENT_TYPE_CAPSET: u32 = 9;
 const EVENT_TYPE_BPF_PROG: u32 = 10;
 const EVENT_TYPE_SECCOMP: u32 = 11;
+const EVENT_TYPE_SOCKET: u32 = 12;
+const EVENT_TYPE_BIND: u32 = 13;
+const EVENT_TYPE_ACCEPT: u32 = 14;
 
 // Seccomp-related constants for human-readable output
 const PR_SET_SECCOMP: u32 = 22;
@@ -43,6 +46,13 @@ const SECCOMP_MODE_STRICT: u32 = 1;
 const SECCOMP_MODE_FILTER: u32 = 2;
 const SECCOMP_SET_MODE_STRICT: u32 = 0;
 const SECCOMP_SET_MODE_FILTER: u32 = 1;
+
+// Network-related constants for human-readable output
+const AF_INET: i32 = 2;
+const AF_INET6: i32 = 10;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const SOCK_RAW: i32 = 3;
 
 // Event structure that matches our BPF code
 #[repr(C)]
@@ -68,6 +78,7 @@ union EventData {
     capset_info: CapsetInfo,
     bpf_prog_info: BpfProgInfo,
     seccomp_info: SeccompInfo,
+    sock_info: SockInfo,
 }
 
 #[repr(C)]
@@ -138,6 +149,17 @@ struct SeccompInfo {
     flags: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SockInfo {
+    domain: i32,
+    type_: i32,
+    protocol: i32,
+    sock_fd: u32,
+    addr: u32,
+    port: u16,
+}
+
 // User-friendly, serializable event struct for JSON output
 #[derive(Debug, Serialize, Deserialize)]
 struct EventOutput {
@@ -191,6 +213,18 @@ struct EventOutput {
     seccomp_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seccomp_flags: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_protocol: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_fd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socket_port: Option<u16>,
 }
 
 // Helper function to convert C string to Rust string
@@ -252,6 +286,12 @@ fn handle_event(data: &[u8]) -> i32 {
         seccomp_option: None,
         seccomp_mode: None,
         seccomp_flags: None,
+        socket_domain: None,
+        socket_type: None,
+        socket_protocol: None,
+        socket_fd: None,
+        socket_addr: None,
+        socket_port: None,
     };
 
     match raw.event_type {
@@ -336,6 +376,36 @@ fn handle_event(data: &[u8]) -> i32 {
             });
 
             event.seccomp_flags = Some(seccomp_info.flags);
+        }
+        EVENT_TYPE_SOCKET | EVENT_TYPE_BIND | EVENT_TYPE_ACCEPT => {
+            let sock_info = unsafe { raw.data.sock_info };
+            
+            // Convert domain to human-readable string
+            event.socket_domain = Some(match sock_info.domain {
+                AF_INET => "AF_INET".to_string(),
+                AF_INET6 => "AF_INET6".to_string(),
+                _ => format!("unknown({})", sock_info.domain),
+            });
+
+            // Convert socket type to human-readable string
+            event.socket_type = Some(match sock_info.type_ {
+                SOCK_STREAM => "SOCK_STREAM".to_string(),
+                SOCK_DGRAM => "SOCK_DGRAM".to_string(),
+                SOCK_RAW => "SOCK_RAW".to_string(),
+                _ => format!("unknown({})", sock_info.type_),
+            });
+
+            event.socket_protocol = Some(sock_info.protocol);
+            event.socket_fd = Some(sock_info.sock_fd);
+
+            if raw.event_type == EVENT_TYPE_BIND {
+                // For bind events, we have the local address and port
+                if sock_info.addr != 0 {
+                    let addr = Ipv4Addr::from(u32::from_be(sock_info.addr));
+                    event.socket_addr = Some(addr.to_string());
+                    event.socket_port = Some(sock_info.port);
+                }
+            }
         }
         _ => {
             warn!("Received unknown event type: {}", raw.event_type);

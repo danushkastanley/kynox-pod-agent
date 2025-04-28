@@ -59,6 +59,15 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_CAPSET 9
 #define EVENT_TYPE_BPF_PROG 10
 #define EVENT_TYPE_SECCOMP 11
+#define EVENT_TYPE_SOCKET 12
+#define EVENT_TYPE_BIND 13
+#define EVENT_TYPE_ACCEPT 14
+
+// Network-related constants
+#define AF_INET6 10
+#define SOCK_STREAM 1
+#define SOCK_DGRAM 2
+#define SOCK_RAW 3
 
 // Define seccomp-related constants
 #define PR_SET_SECCOMP 22
@@ -118,6 +127,14 @@ struct exec_monitor_event {
             __u32 mode;          // Seccomp mode being set
             __u32 flags;         // Additional flags
         } seccomp_info;
+        struct {
+            __s32 domain;     // AF_INET, AF_INET6, etc.
+            __s32 type;       // SOCK_STREAM, SOCK_DGRAM, etc.
+            __s32 protocol;   // IPPROTO_TCP, IPPROTO_UDP, etc.
+            __u32 sock_fd;    // Socket file descriptor
+            __u32 addr;       // IP address for bind/accept
+            __u16 port;       // Port number for bind/accept
+        } sock_info;
     };
 };
 
@@ -497,4 +514,83 @@ int handle_seccomp(struct trace_event_raw_sys_enter *ctx)
 
     submit_event(e);
     return 0;
+}
+
+// Handler for socket syscall
+SEC("tp/syscalls/sys_enter_socket")
+int handle_socket(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_SOCKET);
+    
+    // socket(domain, type, protocol)
+    e->sock_info.domain = (int)ctx->args[0];
+    e->sock_info.type = (int)ctx->args[1];
+    e->sock_info.protocol = (int)ctx->args[2];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for bind syscall
+SEC("tp/syscalls/sys_enter_bind")
+int handle_bind(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_BIND);
+    
+    // bind(sockfd, addr, addrlen)
+    e->sock_info.sock_fd = (int)ctx->args[0];
+
+    struct sockaddr_in addr;
+    if (bpf_probe_read(&addr, sizeof(addr), (void *)ctx->args[1]) == 0) {
+        e->sock_info.port = bpf_ntohs(addr.sin_port);
+        e->sock_info.addr = addr.sin_addr.s_addr;
+    }
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for accept/accept4 syscalls
+SEC("tp/syscalls/sys_enter_accept")
+int handle_accept(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_ACCEPT);
+    
+    // accept(sockfd, addr, addrlen)
+    e->sock_info.sock_fd = (int)ctx->args[0];
+
+    // We can't get client addr/port at syscall entry
+    // They will be filled by the kernel during accept
+    e->sock_info.addr = 0;
+    e->sock_info.port = 0;
+
+    submit_event(e);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_accept4")
+int handle_accept4(struct trace_event_raw_sys_enter *ctx)
+{
+    return handle_accept(ctx);
 }
