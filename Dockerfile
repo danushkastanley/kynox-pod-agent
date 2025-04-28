@@ -32,22 +32,41 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
     BPF_CLANG=clang-14 \
-    BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu -I/usr/include/linux -I/usr/include/asm" \
-    TMPDIR=/tmp
+    TMPDIR=/tmp \
+    LIBELF_INCLUDE_DIR=/usr/include \
+    LIBBPF_INCLUDE_DIR=/usr/include \
+    LIBBPF_LIB_DIR=/usr/lib/x86_64-linux-gnu
 
-# Install Rust via rustup and add rustfmt component in the same layer
+# Set up proper BPF CFLAGS
+ENV BPF_CFLAGS="-I/usr/include/x86_64-linux-gnu \
+    -I/usr/include/linux \
+    -I/usr/include \
+    -D__TARGET_ARCH_x86 \
+    -D__x86_64__ \
+    -D__BPF_TRACING__ \
+    -Wno-unused-value \
+    -Wno-pointer-sign \
+    -Wno-compare-distinct-pointer-types \
+    -Wno-gnu-variable-sized-type-not-at-end \
+    -Wno-address-of-packed-member \
+    -Wno-tautological-compare \
+    -Wno-unknown-warning-option"
+
+# Install Rust and components
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
     /usr/local/cargo/bin/rustup component add rustfmt
 
-# Ensure proper temporary directory permissions
-RUN mkdir -p /tmp && chmod 1777 /tmp
-
-# Set up kernel headers and symlinks
-RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
-    ln -sf /usr/include/linux /usr/include/linux && \
-    ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so && \
+# Set up kernel headers and BPF infrastructure
+RUN mkdir -p /tmp && chmod 1777 /tmp && \
     mkdir -p /usr/src/linux/tools/lib/bpf && \
-    touch /usr/src/linux/tools/lib/bpf/libbpf.a
+    touch /usr/src/linux/tools/lib/bpf/libbpf.a && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
+    ln -sf /usr/include/linux /usr/include/linux && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so
+
+# Create necessary directories for BPF maps
+RUN mkdir -p /sys/fs/bpf && \
+    mkdir -p /sys/kernel/debug/tracing
 
 WORKDIR /workspace
 
