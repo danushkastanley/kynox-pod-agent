@@ -33,6 +33,7 @@ const EVENT_TYPE_SETGID: u32 = 6;
 const EVENT_TYPE_MOUNT: u32 = 7;
 const EVENT_TYPE_UMOUNT: u32 = 8;
 const EVENT_TYPE_CAPSET: u32 = 9;
+const EVENT_TYPE_BPF_PROG: u32 = 10;
 
 // Event structure that matches our BPF code
 #[repr(C)]
@@ -56,6 +57,7 @@ union EventData {
     mount_info: MountInfo,
     umount_info: UmountInfo,
     capset_info: CapsetInfo,
+    bpf_prog_info: BpfProgInfo,
 }
 
 #[repr(C)]
@@ -107,6 +109,16 @@ struct CapsetInfo {
     pid: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BpfProgInfo {
+    cmd: u32,
+    prog_type: u32,
+    insn_cnt: u32,
+    license_len: u32,
+    license: [i8; 64],
+}
+
 // User-friendly, serializable event struct for JSON output
 #[derive(Debug, Serialize, Deserialize)]
 struct EventOutput {
@@ -144,6 +156,14 @@ struct EventOutput {
     capset_cap: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capset_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bpf_cmd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bpf_prog_type: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bpf_insn_cnt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bpf_license: Option<String>,
 }
 
 // Helper function to convert C string to Rust string
@@ -197,6 +217,10 @@ fn handle_event(data: &[u8]) -> i32 {
         umount_flags: None,
         capset_cap: None,
         capset_pid: None,
+        bpf_cmd: None,
+        bpf_prog_type: None,
+        bpf_insn_cnt: None,
+        bpf_license: None,
     };
 
     match raw.event_type {
@@ -243,6 +267,15 @@ fn handle_event(data: &[u8]) -> i32 {
             // We don't need specific filename/daddr for capset
             event.parent_pid = Some(raw.parent_pid); // Ensure parent PID is included if needed
             event.child_pid = None; // Capset doesn't have a child_pid concept here
+        }
+        EVENT_TYPE_BPF_PROG => {
+            let bpf_info = unsafe { raw.data.bpf_prog_info };
+            event.bpf_cmd = Some(bpf_info.cmd);
+            event.bpf_prog_type = Some(bpf_info.prog_type);
+            event.bpf_insn_cnt = Some(bpf_info.insn_cnt);
+            if bpf_info.license_len > 0 {
+                event.bpf_license = Some(cstr_to_string(&bpf_info.license));
+            }
         }
         _ => {
             warn!("Received unknown event type: {}", raw.event_type);

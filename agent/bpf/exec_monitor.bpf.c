@@ -57,6 +57,7 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_MOUNT 7
 #define EVENT_TYPE_UMOUNT 8
 #define EVENT_TYPE_CAPSET 9
+#define EVENT_TYPE_BPF_PROG 10
 
 struct exec_monitor_event {
     __u32 event_type;
@@ -94,6 +95,13 @@ struct exec_monitor_event {
             __u32 cap;
             __u32 pid;
         } capset_info;
+        struct {
+            __u32 cmd;           // BPF command (e.g., BPF_PROG_LOAD)
+            __u32 prog_type;     // Type of BPF program being loaded
+            __u32 insn_cnt;      // Number of BPF instructions
+            __u32 license_len;   // Length of license string
+            char license[64];    // License string (truncated if needed)
+        } bpf_prog_info;
     };
 };
 
@@ -354,6 +362,57 @@ int handle_capset(struct trace_event_raw_sys_enter *ctx) {
     // capset arguments: pid_t pid, cap_t cap
     e->capset_info.pid = (__u32)ctx->args[0];
     e->capset_info.cap = (__u32)ctx->args[1];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for bpf syscall
+SEC("tp/syscalls/sys_enter_bpf")
+int handle_bpf(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+    int cmd = (int)ctx->args[0];  // First argument is the command
+
+    // We're primarily interested in BPF_PROG_LOAD (5)
+    if (cmd != 5) {
+        return 0;
+    }
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_BPF_PROG);
+
+    // Get the attr argument which contains program details
+    struct {
+        __u32 prog_type;
+        __u32 insn_cnt;
+        __u64 insns;
+        __u64 license;
+        __u32 log_level;
+        __u32 log_size;
+        __u64 log_buf;
+        __u32 kern_version;
+        __u32 prog_flags;
+    } attr;
+
+    if (bpf_probe_read(&attr, sizeof(attr), (void *)ctx->args[1]) == 0) {
+        e->bpf_prog_info.cmd = cmd;
+        e->bpf_prog_info.prog_type = attr.prog_type;
+        e->bpf_prog_info.insn_cnt = attr.insn_cnt;
+        
+        // Try to read the license string
+        char license[64];
+        if (bpf_probe_read_user_str(license, sizeof(license), (const void *)attr.license) > 0) {
+            bpf_probe_read_kernel_str(e->bpf_prog_info.license, sizeof(e->bpf_prog_info.license), license);
+            e->bpf_prog_info.license_len = sizeof(license);
+        } else {
+            e->bpf_prog_info.license_len = 0;
+        }
+    }
 
     submit_event(e);
     return 0;
