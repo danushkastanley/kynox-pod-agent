@@ -32,6 +32,7 @@ const EVENT_TYPE_SETUID: u32 = 5;
 const EVENT_TYPE_SETGID: u32 = 6;
 const EVENT_TYPE_MOUNT: u32 = 7;
 const EVENT_TYPE_UMOUNT: u32 = 8;
+const EVENT_TYPE_CAPSET: u32 = 9;
 
 // Event structure that matches our BPF code
 #[repr(C)]
@@ -54,6 +55,7 @@ union EventData {
     setgid_info: SetgidInfo,
     mount_info: MountInfo,
     umount_info: UmountInfo,
+    capset_info: CapsetInfo,
 }
 
 #[repr(C)]
@@ -98,6 +100,13 @@ struct UmountInfo {
     flags: i32, // Use i32 to match int in BPF
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct CapsetInfo {
+    cap: u32,
+    pid: u32,
+}
+
 // User-friendly, serializable event struct for JSON output
 #[derive(Debug, Serialize, Deserialize)]
 struct EventOutput {
@@ -131,6 +140,10 @@ struct EventOutput {
     umount_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     umount_flags: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capset_cap: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capset_pid: Option<u32>,
 }
 
 // Helper function to convert C string to Rust string
@@ -182,6 +195,8 @@ fn handle_event(data: &[u8]) -> i32 {
         mount_flags: None,
         umount_target: None,
         umount_flags: None,
+        capset_cap: None,
+        capset_pid: None,
     };
 
     match raw.event_type {
@@ -220,6 +235,14 @@ fn handle_event(data: &[u8]) -> i32 {
             let umount_info = unsafe { raw.data.umount_info };
             event.umount_target = Some(cstr_to_string(&umount_info.target));
             event.umount_flags = Some(umount_info.flags);
+        }
+        EVENT_TYPE_CAPSET => {
+            let capset_info = unsafe { raw.data.capset_info };
+            event.capset_cap = Some(capset_info.cap);
+            event.capset_pid = Some(capset_info.pid);
+            // We don't need specific filename/daddr for capset
+            event.parent_pid = Some(raw.parent_pid); // Ensure parent PID is included if needed
+            event.child_pid = None; // Capset doesn't have a child_pid concept here
         }
         _ => {
             warn!("Received unknown event type: {}", raw.event_type);

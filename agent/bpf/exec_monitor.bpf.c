@@ -56,6 +56,7 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_SETGID 6
 #define EVENT_TYPE_MOUNT 7
 #define EVENT_TYPE_UMOUNT 8
+#define EVENT_TYPE_CAPSET 9
 
 struct exec_monitor_event {
     __u32 event_type;
@@ -89,6 +90,10 @@ struct exec_monitor_event {
             char target[FS_INFO_LEN];
             int flags;
         } umount_info;
+        struct {
+            __u32 cap;
+            __u32 pid;
+        } capset_info;
     };
 };
 
@@ -335,3 +340,21 @@ int handle_umount2(struct trace_event_raw_sys_enter *ctx) {
     return 0;
 }
 */
+
+// Handler for capset syscall
+SEC("tp/syscalls/sys_enter_capset")
+int handle_capset(struct trace_event_raw_sys_enter *ctx) {
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) return 0;
+
+    init_event(e, EVENT_TYPE_CAPSET);
+
+    // capset arguments: pid_t pid, cap_t cap
+    e->capset_info.pid = (__u32)ctx->args[0];
+    e->capset_info.cap = (__u32)ctx->args[1];
+
+    submit_event(e);
+    return 0;
+}
