@@ -43,8 +43,9 @@ WORKDIR /workspace
 # 1. Copy manifests and create dummy src for dependency build
 COPY ./Cargo.toml ./Cargo.lock /workspace/
 COPY ./agent/Cargo.toml /workspace/agent/
+COPY ./agent-core/Cargo.toml /workspace/agent-core/
 WORKDIR /workspace
-RUN mkdir -p agent/src && echo "fn main() {}" > agent/src/main.rs
+RUN mkdir -p agent/src agent-core/src && echo "fn main() {}" > agent/src/main.rs && echo "pub fn dummy() {}" > agent-core/src/lib.rs
 
 # 2. Build *only* dependencies
 WORKDIR /workspace/agent
@@ -57,6 +58,9 @@ WORKDIR /workspace
 COPY ./agent/src/ ./agent/src/
 COPY ./agent/bpf/ ./agent/bpf/
 COPY ./agent/build.rs ./agent/
+COPY ./agent-core/src/ ./agent-core/src/
+COPY ./agent-core/bpf/ ./agent-core/bpf/
+COPY ./agent-core/build.rs ./agent-core/
 COPY ./vmlinux.h /usr/include/
 
 # 4. Build the final binary (will reuse dependency cache)

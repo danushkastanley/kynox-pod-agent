@@ -1,0 +1,71 @@
+use serde::{Serialize, Deserialize};
+
+mod types;
+pub use types::*;
+
+// User-friendly, serializable event struct for JSON output
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventOutput {
+    pub event_type: u32,
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub child_pid: Option<u32>,
+    pub comm: String,
+    pub filename: Option<String>,
+    pub daddr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dport: Option<u16>,
+    pub timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ptrace_request: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ptrace_target_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_fstype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_flags: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub umount_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub umount_flags: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_effective: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bpf_cmd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bpf_prog_type: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bpf_insn_cnt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bpf_license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seccomp_operation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seccomp_option: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seccomp_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seccomp_flags: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_protocol: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_fd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_port: Option<u16>,
+}

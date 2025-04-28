@@ -1,2 +1,2 @@
 [workspace]
-members = ["agent"]
+members = ["agent", "agent-core"]
