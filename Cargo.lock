@@ -10,7 +10,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "libbpf-cargo 0.21.2",
- "libbpf-rs 0.21.2",
+ "libbpf-rs 0.20.1",
  "libbpf-sys",
  "libc",
  "log",
