@@ -33,7 +33,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     LIBBPF_INCLUDE_DIR=/usr/include \
     LIBBPF_LIB_DIR=/usr/lib/x86_64-linux-gnu
 
-# Install Rust via rustup and add rustfmt component
+# Install Rust and components
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
     /usr/local/cargo/bin/rustup component add rustfmt
 
@@ -50,25 +50,25 @@ WORKDIR /workspace
 COPY ./Cargo.toml ./Cargo.lock /workspace/
 COPY ./agent/Cargo.toml /workspace/agent/
 COPY ./agent-core/Cargo.toml /workspace/agent-core/
-WORKDIR /workspace
+
+# 2. Create dummy source files for dependencies caching
 RUN mkdir -p agent/src agent-core/src && \
     echo "fn main() {}" > agent/src/main.rs && \
     echo "pub fn dummy() {}" > agent-core/src/lib.rs
 
-# 2. Build dependencies
+# 3. Build dependencies
 RUN cargo fetch
 RUN cargo build --release || true
 
-# 3. Copy the actual source code
+# 4. Copy the actual source code
 COPY ./agent/src/ ./agent/src/
-COPY ./agent/bpf/ ./agent/bpf/
 COPY ./agent/build.rs ./agent/
 COPY ./agent-core/src/ ./agent-core/src/
 COPY ./agent-core/bpf/ ./agent-core/bpf/
 COPY ./agent-core/build.rs ./agent-core/
 COPY ./vmlinux.h /usr/include/
 
-# 4. Build the final binary
+# 5. Build the final binary
 ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu
 RUN cargo build --release --bin agent
 
