@@ -13,39 +13,48 @@ spec:
       labels:
         app: pod-agent
     spec:
-      # Consider hostNetwork/hostPID if agent needs them
-      # hostNetwork: true 
-      # hostPID: true 
+      hostNetwork: true  # Needed for network monitoring
+      hostPID: true     # Needed for process monitoring
       containers:
       - name: pod-agent 
         # --- Use local image ---
         image: pod-agent:latest         # Use local tag
         imagePullPolicy: Never        # Use local image ONLY
         # --- End image config ---
+        env:
+        - name: CONTROLLER_ENDPOINT
+          value: "http://rasp-controller.default.svc.cluster.local:50051"
         securityContext:
           privileged: true              # Needed for eBPF kernel access
+          capabilities:
+            add: ["SYS_ADMIN"]  # Required for eBPF
         volumeMounts:                 # Mount necessary host paths
         - name: sys-kernel-debug
           mountPath: /sys/kernel/debug
           readOnly: true 
-        # Add other required mounts:
-        # - name: proc-fs
-        #   mountPath: /proc
-        #   readOnly: true
-        # - name: sys-fs-bpf
-        #   mountPath: /sys/fs/bpf
+        - name: proc-fs
+          mountPath: /proc
+          readOnly: true
+        - name: sys-fs-bpf
+          mountPath: /sys/fs/bpf
+        - name: kernel-modules
+          mountPath: /lib/modules
+          readOnly: true
       terminationGracePeriodSeconds: 30
       volumes:                        # Define the hostPath volumes
       - name: sys-kernel-debug
         hostPath:
           path: /sys/kernel/debug
           type: Directory
-      # Define other volumes here:
-      # - name: proc-fs
-      #   hostPath:
-      #     path: /proc
-      #     type: Directory
-      # - name: sys-fs-bpf
-      #   hostPath:
-      #     path: /sys/fs/bpf
-      #     type: DirectoryOrCreate # Needed if agent mounts BPF maps here
+      - name: proc-fs
+        hostPath:
+          path: /proc
+          type: Directory
+      - name: sys-fs-bpf
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate # Needed if agent mounts BPF maps here
+      - name: kernel-modules
+        hostPath:
+          path: /lib/modules
+          type: Directory
