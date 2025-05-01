@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     linux-libc-dev \
     git \
     linux-tools-generic \
+    protobuf-compiler \
+    libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up clang-14 as the default
@@ -50,6 +52,7 @@ WORKDIR /workspace
 COPY ./Cargo.toml ./Cargo.lock /workspace/
 COPY ./agent/Cargo.toml /workspace/agent/
 COPY ./agent-core/Cargo.toml /workspace/agent-core/
+COPY ./telemetry.proto /workspace/
 
 # 2. Create dummy source files for dependencies caching
 RUN mkdir -p agent/src agent-core/src && \
