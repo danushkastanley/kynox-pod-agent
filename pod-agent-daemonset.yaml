@@ -12,8 +12,11 @@ spec:
     metadata:
       labels:
         app: pod-agent
+      annotations:
+        k8s.v1.cni.cncf.io/networks: default/rasp-network
     spec:
-      hostNetwork: true  # Needed for network monitoring
+      dnsPolicy: ClusterFirst
+      hostNetwork: false  # Changed to false to use pod networking
       hostPID: true     # Needed for process monitoring
       containers:
       - name: pod-agent 
@@ -23,11 +26,13 @@ spec:
         # --- End image config ---
         env:
         - name: CONTROLLER_ENDPOINT
-          value: "http://rasp-controller.default.svc.cluster.local:50051"
+          value: "http://rasp-controller.default.svc:50051"  # Simplified service name
+        - name: RUST_LOG
+          value: "debug"  # Added to get more detailed logs
         securityContext:
           privileged: true              # Needed for eBPF kernel access
           capabilities:
-            add: ["SYS_ADMIN"]  # Required for eBPF
+            add: ["SYS_ADMIN", "NET_ADMIN"]  # Added NET_ADMIN for network access
         volumeMounts:                 # Mount necessary host paths
         - name: sys-kernel-debug
           mountPath: /sys/kernel/debug

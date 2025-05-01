@@ -55,7 +55,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 break channel;
             }
             Err(e) => {
-                log::error!("Failed to connect: {}. Retrying in 5s...", e);
+                log::error!("Failed to connect: {:?}", e);
+                log::error!("Connection details: Endpoint={}, Error={:#?}", endpoint, e);
+                
+                // Try to resolve the DNS name
+                if let Ok(addrs) = tokio::net::lookup_host(format!("rasp-controller.default.svc.cluster.local:50051")).await {
+                    log::info!("DNS lookup results for controller:");
+                    for addr in addrs {
+                        log::info!("  Found address: {}", addr);
+                    }
+                } else {
+                    log::error!("Failed to resolve controller DNS name");
+                }
+                
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
