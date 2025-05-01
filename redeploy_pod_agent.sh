@@ -1,9 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
-# Safe redeploy script for the pod-agent DaemonSet on a k3s node
-# ──────────────────────────────────────────────────────────────
-# • Builds the image straight into an OCI tarball (no layers left in /var/lib/docker)
-# • Imports that tarball into k3s’ containerd
+# Redeploys the pod-agent with a clean slate:
 # • Prunes old images/layers in both Docker and containerd
 # • Restarts the DaemonSet cleanly
 # • Leaves root disk clean and predictable
@@ -18,10 +15,10 @@ IMAGE_NAME="pod-agent"
 IMAGE_TAG="latest"                     # change to a version if you want history
 FULL_REF="docker.io/library/${IMAGE_NAME}:${IMAGE_TAG}"
 TAR_FILE="${IMAGE_NAME}.oci.tar"       # lives only for a few seconds
-DAEMONSET_YAML="pod-agent-daemonset.yaml"
+YAML_FILES=("network-policy.yaml" "pod-agent-daemonset.yaml")  # All YAML files in order
 
 # ─── Build image → OCI tarball only (skips Docker's local image store) ─────────
-echo "🛠️  (1/6) Building ${FULL_REF} to OCI tarball…"
+echo "🛠️  (1/7) Building ${FULL_REF} to OCI tarball…"
 docker buildx build \
   --progress=plain \
   --tag "${FULL_REF}" \
@@ -29,11 +26,11 @@ docker buildx build \
   .
 
 # ─── Remove *all* dangling data from Docker (no layers kept) ───────────────────
-echo "🧹 (2/6) Docker: pruning unused objects…"
+echo "🧹 (2/7) Docker: pruning unused objects…"
 docker system prune -af --volumes
 
 # ─── Import the tarball into containerd & drop the tar ─────────────────────────
-echo "💾 (3/6) Importing image into k3s containerd..."
+echo "💾 (3/7) Importing image into k3s containerd..."
 sudo k3s ctr --namespace k8s.io images import "${TAR_FILE}"
 if [ $? -ne 0 ]; then
     echo "❌ Image import failed!"
@@ -41,14 +38,27 @@ fi
 rm -f "${TAR_FILE}"
 
 # ─── Prune unused / old images in containerd (keeps ones in use) ───────────────
-echo "🧹 (4/6) containerd: pruning unused images..."
+echo "🧹 (4/7) containerd: pruning unused images..."
 # sudo k3s crictl rmi --prune # <<< Commented out - seems too aggressive
 
-# ─── Restart the DaemonSet (delete pods; controller recreates) ─────────────────
-echo "🔄 (5/6) Forcing pod refresh…"
+# ─── Delete existing resources ─────────────────────────────────────────────────
+echo "🗑️  (5/7) Removing existing resources..."
+kubectl delete networkpolicy rasp-network-policy --ignore-not-found
 kubectl delete pod -l "app=${IMAGE_NAME}" --force --grace-period=0 --ignore-not-found
 
-echo "🚀 (6/6) Applying ${DAEMONSET_YAML}…"
-kubectl apply -f "${DAEMONSET_YAML}"
+# ─── Apply all YAML files in order ────────────────────────────────────────────
+echo "🚀 (6/7) Applying Kubernetes resources..."
+for yaml in "${YAML_FILES[@]}"; do
+    if [ -f "$yaml" ]; then
+        echo "📄 Applying $yaml..."
+        kubectl apply -f "$yaml"
+    else
+        echo "⚠️  Warning: $yaml not found"
+    fi
+done
 
-echo "✅ Done!   Follow rollout with:  kubectl get pods -l app=${IMAGE_NAME} -w"
+# ─── Wait for pods to be ready ────────────────────────────────────────────────
+echo "⏳ (7/7) Waiting for pods to be ready..."
+kubectl wait --for=condition=ready pod -l "app=${IMAGE_NAME}" --timeout=60s
+
+echo "✅ Deployment complete!"
