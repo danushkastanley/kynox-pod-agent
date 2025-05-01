@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bpf::{ExecMonitorSkel, ExecMonitorSkelBuilder};
 use crate::constants::{
     EVENT_TYPE_ACCEPT, EVENT_TYPE_BIND, EVENT_TYPE_BPF_PROG, EVENT_TYPE_CAPSET,
-    EVENT_TYPE_CONNECT, EVENT_TYPE_EXEC, EVENT_TYPE_MOUNT, EVENT_TYPE_OPEN,
+    EVENT_TYPE_CONNECT, EVENT_TYPE_EXEC, EVENT_TYPE_FORK, EVENT_TYPE_MOUNT, EVENT_TYPE_OPEN,
     EVENT_TYPE_PTRACE, EVENT_TYPE_SECCOMP, EVENT_TYPE_SETGID, EVENT_TYPE_SETUID,
     EVENT_TYPE_SOCKET, EVENT_TYPE_UMOUNT, SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT,
     SECCOMP_PRCTL, SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT, SECCOMP_SYSCALL,
@@ -189,6 +189,10 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             let info = unsafe { raw.data.capset_info };
             event.cap_effective = Some(info.cap);
             event.cap_pid = Some(info.pid);
+        }
+        EVENT_TYPE_FORK => {
+            // Fork events only need the common fields (pid, parent_pid, child_pid, comm)
+            // which are already copied in the EventOutput initialization
         }
         EVENT_TYPE_BPF_PROG => {
             // SAFETY: Assumes event_type guarantees the correct union field is active.

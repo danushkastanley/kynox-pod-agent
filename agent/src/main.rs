@@ -49,13 +49,14 @@ impl AgentConfig {
     fn load() -> Self {
         Self {
             controller_endpoint: env::var("CONTROLLER_ENDPOINT")
-                .unwrap_or_else(|_| "http://rasp-controller.default.svc:50051".to_string()),
+                .unwrap_or_else(|_| "rasp-controller.default.svc:50051".to_string()),
         }
     }
 }
 
 async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
+        let endpoint = format!("http://{}", endpoint);  // Add http:// prefix for tonic
         let (tx, mut rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
         let tx = Arc::new(tokio::sync::Mutex::new(tx));
         let tx_clone = tx.clone();

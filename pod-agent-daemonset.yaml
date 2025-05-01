@@ -26,7 +26,7 @@ spec:
         # --- End image config ---
         env:
         - name: CONTROLLER_ENDPOINT
-          value: "http://rasp-controller.default.svc:50051"  # Simplified service name
+          value: "rasp-controller.default.svc:50051"  # Removed http:// prefix for gRPC
         - name: RUST_LOG
           value: "debug"  # Added to get more detailed logs
         securityContext:
