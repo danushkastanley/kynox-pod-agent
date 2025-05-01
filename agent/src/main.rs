@@ -18,11 +18,11 @@ pub mod telemetry {
 use telemetry::{SecurityEvent, telemetry_service_client::TelemetryServiceClient};
 
 // Increased buffer sizes and timeouts
-const EVENT_CHANNEL_SIZE: usize = 10000;
-const EVENT_BATCH_SIZE: usize = 100;
+const EVENT_CHANNEL_SIZE: usize = 50000;
+const EVENT_BATCH_SIZE: usize = 500;
 const BPF_POLL_TIMEOUT_MS: u32 = 100;
 const RECONNECT_DELAY_MS: u64 = 5000;
-const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 
 const EVENT_TYPE_EXEC: u32 = 0;
 const EVENT_TYPE_OPEN: u32 = 1;
@@ -70,8 +70,18 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                 if let Some(event) = parse_bpf_event(data) {
                     if let Ok(security_event) = convert_eventoutput_to_securityevent(&event) {
                         if let Ok(sender) = tx.try_lock() {
-                            if let Err(e) = sender.try_send(security_event) {
-                                warn!("Event channel error: {:?}", e);
+                            match sender.try_send(security_event) {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    match e {
+                                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                                            warn!("Event channel full - dropping event");
+                                        }
+                                        _ => {
+                                            warn!("Event channel error: {:?}", e);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -101,19 +111,18 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                     tokio::select! {
                         _ = batch_timer.tick() => {
                             if !events.is_empty() {
-                                let (batch_tx, batch_rx) = mpsc::channel(1);
-                                for event in events.drain(..) {
-                                    batch_tx.try_send(event).unwrap_or_else(|e| warn!("Failed to send to batch channel: {:?}", e));
-                                }
-                                let stream = ReceiverStream::new(batch_rx);
-                                
-                                match client.stream_events(Request::new(stream)).await {
+                                let (_, batch_rx) = mpsc::channel(events.len());
+                                match client.stream_events(Request::new(ReceiverStream::new(
+                                    batch_rx
+                                ))).await {
                                     Ok(_) => {
-                                        debug!("Batch of {} events sent successfully", events.capacity());
-                                    }
-                                    Err(status) => {
-                                        error!("Stream error: {:?}", status);
-                                        break;
+                                        debug!("Sent {} events to controller", events.len());
+                                        events.clear();
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to send events: {:?}", e);
+                                        // Don't clear events - they'll be retried
+                                        tokio::time::sleep(Duration::from_millis(1000)).await;
                                     }
                                 }
                             }
@@ -122,19 +131,18 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                         Some(event) = rx.recv() => {
                             events.push(event);
                             if events.len() >= EVENT_BATCH_SIZE {
-                                let (batch_tx, batch_rx) = mpsc::channel(1);
-                                for event in events.drain(..) {
-                                    batch_tx.try_send(event).unwrap_or_else(|e| warn!("Failed to send to batch channel: {:?}", e));
-                                }
-                                let stream = ReceiverStream::new(batch_rx);
-                                
-                                match client.stream_events(Request::new(stream)).await {
+                                let (_, batch_rx) = mpsc::channel(events.len());
+                                match client.stream_events(Request::new(ReceiverStream::new(
+                                    batch_rx
+                                ))).await {
                                     Ok(_) => {
-                                        debug!("Batch of {} events sent successfully", events.capacity());
-                                    }
-                                    Err(status) => {
-                                        error!("Stream error: {:?}", status);
-                                        break;
+                                        debug!("Sent {} events to controller", events.len());
+                                        events.clear();
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to send events: {:?}", e);
+                                        // Don't clear events - they'll be retried
+                                        tokio::time::sleep(Duration::from_millis(1000)).await;
                                     }
                                 }
                             }
