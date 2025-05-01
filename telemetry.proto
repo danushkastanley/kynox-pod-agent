@@ -57,8 +57,8 @@ message SecurityEvent {
 
 // Service definition for the telemetry controller
 service TelemetryService {
-  // Sends a stream of security events
-  rpc SendEvents(stream SecurityEvent) returns (SendEventsResponse);
+  // Streams security events from agent to controller
+  rpc StreamEvents(stream SecurityEvent) returns (SendEventsResponse);
 }
 
 // Response message for SendEvents (can be simple acknowledgement)

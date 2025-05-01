@@ -1,9 +1,9 @@
 # Multi-stage Dockerfile to build the eBPF RASP agent on Linux
 
 # Builder stage
-FROM --platform=linux/amd64 ubuntu:22.04 AS builder
+FROM --platform=linux/amd64 ubuntu:22.04 as builder
 
-# Install common dependencies and rustup prerequisites
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -22,68 +22,77 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up clang-14 as the default
+# Set up clang and llvm-strip
 RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 && \
     update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-14 100
 
-# Install Rust via rustup
+# Install Rust
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    BPF_CLANG=clang-14 \
-    LIBELF_INCLUDE_DIR=/usr/include \
-    LIBBPF_INCLUDE_DIR=/usr/include \
-    LIBBPF_LIB_DIR=/usr/lib/x86_64-linux-gnu
+    PATH=/usr/local/cargo/bin:$PATH
 
-# Install Rust and components
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
-    /usr/local/cargo/bin/rustup component add rustfmt
+    . $CARGO_HOME/env && \
+    rustup component add rustfmt
 
-# Link headers
+# Set up kernel headers
 RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
     ln -sf /usr/include/linux /usr/include/linux && \
     ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so
 
 WORKDIR /workspace
 
-# --- Optimized Build Steps ---
-
-# 1. Copy manifests and create dummy src for dependency build
+# Copy dependency files first for better caching
 COPY ./Cargo.toml ./Cargo.lock /workspace/
 COPY ./agent/Cargo.toml /workspace/agent/
 COPY ./agent-core/Cargo.toml /workspace/agent-core/
+
+# Copy protobuf definition
 COPY ./telemetry.proto /workspace/
 
-# 2. Create dummy source files for dependencies caching
+# Create minimal src files to build dependencies
 RUN mkdir -p agent/src agent-core/src && \
     echo "fn main() {}" > agent/src/main.rs && \
     echo "pub fn dummy() {}" > agent-core/src/lib.rs
 
-# 3. Build dependencies
+# Fetch dependencies
 RUN cargo fetch
-RUN cargo build --release || true
 
-# 4. Copy the actual source code
-COPY ./agent/src/ ./agent/src/
+# Copy build files
 COPY ./agent/build.rs ./agent/
+COPY ./agent-core/build.rs ./agent-core/
+
+# Copy source files
+COPY ./agent/src/ ./agent/src/
 COPY ./agent-core/src/ ./agent-core/src/
 COPY ./agent-core/bpf/ ./agent-core/bpf/
-COPY ./agent-core/build.rs ./agent-core/
+
+# Copy vmlinux.h
 COPY ./vmlinux.h /usr/include/
 
-# 5. Build the final binary
-ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu
+# Set LIBBPF path and build BPF code
+ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu \
+    BPF_CLANG=clang-14 \
+    LIBELF_INCLUDE_DIR=/usr/include \
+    LIBBPF_INCLUDE_DIR=/usr/include \
+    LIBBPF_LIB_DIR=/usr/lib/x86_64-linux-gnu
+
+RUN cd agent-core && cargo build --release && cd ..
+
+# Build the final binary
 RUN cargo build --release --bin agent
 
 # Runtime stage
-FROM ubuntu:22.04
+FROM --platform=linux/amd64 ubuntu:22.04
 
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf1 \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy binary and vmlinux.h
 COPY --from=builder /workspace/target/release/agent /agent
 COPY --from=builder /usr/include/vmlinux.h /usr/include/
 
+# Set the entrypoint
 ENTRYPOINT ["/agent"]

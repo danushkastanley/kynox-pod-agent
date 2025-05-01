@@ -1,6 +1,5 @@
 use std::env;
 use std::error::Error;
-use std::collections::HashMap;
 use std::time::Duration;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -9,7 +8,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
 use tonic::{transport::Channel, Request, Code};
 use log::{warn, error, info, debug};
-use tokio::task;
 
 use agent_core::{SyscallMonitor, parse_bpf_event, EventOutput}; 
 use agent_core::constants::*; 
@@ -48,35 +46,95 @@ struct AgentConfig {
 
 impl AgentConfig {
     fn load() -> Self {
-        let controller_endpoint = env::var("CONTROLLER_ENDPOINT")
-            .unwrap_or_else(|_| "http://[::1]:50051".to_string());
-        AgentConfig {
-            controller_endpoint,
+        Self {
+            controller_endpoint: env::var("CONTROLLER_ENDPOINT")
+                .unwrap_or_else(|_| "http://rasp-controller.default.svc:50051".to_string()),
         }
     }
 }
 
-async fn run_event_sender(
-    mut client: TelemetryServiceClient<Channel>,
-    rx: mpsc::Receiver<SecurityEvent>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    info!("Starting event sender task");
-    
-    let event_stream = ReceiverStream::new(rx);
-    match client.send_events(Request::new(event_stream)).await {
-        Ok(response) => {
-            info!("Stream completed successfully: {:?}", response.into_inner());
-            Ok(())
-        }
-        Err(status) => {
-            error!("Stream error: {:?}", status);
-            if status.code() == Code::Unavailable {
-                // Server is unavailable - signal for retry
-                Err("Server unavailable".into())
-            } else {
-                Err(Box::new(status))
+async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+    loop {
+        // Create a new channel for each connection attempt
+        let (tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE * 10);
+        let tx = Arc::new(tokio::sync::Mutex::new(tx));
+        
+        // Clone for the BPF event processing task
+        let tx_clone = tx.clone();
+        
+        // Spawn BPF event processing task
+        let _bpf_handle = tokio::spawn(async move {
+            let mut monitor = SyscallMonitor::new().expect("Failed to create syscall monitor");
+            monitor.attach().expect("Failed to attach BPF programs");
+            info!("BPF programs attached successfully");
+
+            let tx = tx_clone.clone();
+            let callback = move |data: &[u8]| {
+                if let Some(event) = parse_bpf_event(data) {
+                    debug!("Converting EventOutput (PID: {}) to SecurityEvent", event.pid);
+                    match convert_eventoutput_to_securityevent(&event) {
+                        Ok(security_event) => {
+                            if let Ok(sender) = tx.try_lock() {
+                                if let Err(_) = sender.try_send(security_event) {
+                                    warn!("Event channel full, dropping event: PID {}", event.pid);
+                                }
+                            }
+                        }
+                        Err(e) => error!("Failed to convert event: {:?}", e),
+                    }
+                }
+                0
+            };
+
+            monitor.setup_ring_buffer(callback).expect("Failed to setup ring buffer");
+            info!("Ring buffer setup complete");
+
+            loop {
+                if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
+                    error!("Error polling events: {:?}", e);
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                }
+            }
+        });
+
+        match Channel::from_shared(endpoint.clone())?.connect().await {
+            Ok(channel) => {
+                info!("Connected to controller");
+                let mut client = TelemetryServiceClient::new(channel);
+                
+                // Create stream from our receiver
+                let stream = ReceiverStream::new(rx);
+                
+                match client.stream_events(Request::new(stream)).await {
+                    Ok(response) => {
+                        info!("Stream completed successfully: {:?}", response.into_inner());
+                    }
+                    Err(status) => {
+                        error!("Stream error: {:?}", status);
+                        if status.code() == Code::Unavailable {
+                            info!("Server unavailable, will retry...");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Connection failed: {:?}", e);
+                error!("Connection details: Endpoint={}, Error={:#?}", endpoint, e);
+                
+                // Try DNS resolution
+                if let Ok(addrs) = tokio::net::lookup_host("rasp-controller.default.svc:50051").await {
+                    info!("DNS lookup results for controller:");
+                    for addr in addrs {
+                        info!("  Found address: {}", addr);
+                    }
+                } else {
+                    error!("Failed to resolve controller DNS name");
+                }
             }
         }
+        
+        info!("Waiting before reconnection attempt...");
+        tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
     }
 }
 
@@ -87,120 +145,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let config = Arc::new(Mutex::new(AgentConfig::load()));
     info!("Configuration loaded: {:?}", config.lock().unwrap());
-
+    
     let endpoint = config.lock().unwrap().controller_endpoint.clone();
     info!("Attempting to connect to controller at: {}", endpoint);
-
-    // Create channel for events with larger buffer
-    let (event_tx, _event_rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
-    let event_tx = Arc::new(tokio::sync::Mutex::new(event_tx));
-
-    // Start gRPC sender task
-    let endpoint_clone = endpoint.clone();
-    let grpc_sender_handle = tokio::spawn(async move {
-        loop {
-            // Create a new channel for each connection attempt
-            let (_tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
-            
-            match Channel::from_shared(endpoint_clone.clone()) {
-                Ok(channel) => {
-                    match channel.connect().await {
-                        Ok(channel) => {
-                            info!("Connected to controller");
-                            let client = TelemetryServiceClient::new(channel);
-                            
-                            if let Err(e) = run_event_sender(client, rx).await {
-                                error!("Event sender error: {:?}", e);
-                            }
-                        }
-                        Err(e) => {
-                            error!("Connection failed: {:?}", e);
-                            error!("Connection details: Endpoint={}, Error={:#?}", endpoint_clone, e);
-                            
-                            // Try DNS resolution
-                            if let Ok(addrs) = tokio::net::lookup_host("rasp-controller.default.svc:50051").await {
-                                info!("DNS lookup results for controller:");
-                                for addr in addrs {
-                                    info!("  Found address: {}", addr);
-                                }
-                            } else {
-                                error!("Failed to resolve controller DNS name");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Invalid URI: {:?}", e);
-                }
-            }
-            
-            info!("Waiting before reconnection attempt...");
-            tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
-        }
-    });
-
-    info!("Initializing BPF Syscall Monitor...");
-    let mut monitor = SyscallMonitor::new()?;
-    monitor.attach()?;
-    info!("BPF programs attached.");
-
-    let event_tx_clone = event_tx.clone();
-    let bpf_event_callback = move |data: &[u8]| {
-        match parse_bpf_event(data) {
-            Some(parsed_event) => {
-                match convert_eventoutput_to_securityevent(&parsed_event) {
-                    Ok(security_event) => {
-                        let event_tx = event_tx_clone.clone();
-                        tokio::spawn(async move {
-                            let tx = event_tx.lock().await;
-                            match tx.try_send(security_event) {
-                                Ok(_) => debug!("Event sent to channel"),
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    warn!("Event channel full, dropping event: PID {}", parsed_event.pid);
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    error!("Event channel closed - this should not happen");
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("Failed to convert BPF event (PID {}): {}", parsed_event.pid, e);
-                    }
-                }
-            }
-            None => {
-                warn!("Failed to parse BPF event from raw data ({} bytes)", data.len());
-            }
-        }
-        0 
-    };
-
-    monitor.setup_ring_buffer(bpf_event_callback)?;
-    info!("Ring buffer setup complete. Starting event poll loop...");
-
-    let monitor_arc = Arc::new(monitor);
-    let monitor_clone = Arc::clone(&monitor_arc);
-    let polling_handle = task::spawn_blocking(move || {
-        info!("BPF polling task started.");
-        loop {
-            match monitor_clone.poll(BPF_POLL_TIMEOUT_MS) {
-                Ok(_) => { /* Successful poll cycle */ }
-                Err(e) => {
-                    error!("BPF polling error: {}. Exiting poll loop.", e);
-                    break;
-                }
-            }
-        }
-        warn!("BPF polling task finished.");
-    });
-
-    let _ = tokio::join!(
-        polling_handle,
-        grpc_sender_handle
-    ) as (Result<(), task::JoinError>, Result<(), task::JoinError>);
-
-    warn!("Agent shutting down.");
+    
+    // Run the event sender
+    if let Err(e) = run_event_sender(endpoint).await {
+        error!("Event sender error: {:?}", e);
+    }
+    
     Ok(())
 }
 
