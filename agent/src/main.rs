@@ -6,11 +6,10 @@ use std::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
-use tonic::{transport::Channel, Request, Code};
+use tonic::{transport::Channel, Request, Status};
 use log::{warn, error, info, debug};
 
 use agent_core::{SyscallMonitor, parse_bpf_event, EventOutput}; 
-use agent_core::constants::*; 
 
 pub mod telemetry {
     tonic::include_proto!("telemetry");
@@ -18,11 +17,13 @@ pub mod telemetry {
 
 use telemetry::{SecurityEvent, telemetry_service_client::TelemetryServiceClient};
 
-const EVENT_CHANNEL_SIZE: usize = 1000; // Increased buffer size
+// Increased buffer sizes and timeouts
+const EVENT_CHANNEL_SIZE: usize = 10000;
+const EVENT_BATCH_SIZE: usize = 100;
 const BPF_POLL_TIMEOUT_MS: u32 = 100;
 const RECONNECT_DELAY_MS: u64 = 5000;
+const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 
-// Event types from agent-core
 const EVENT_TYPE_EXEC: u32 = 0;
 const EVENT_TYPE_OPEN: u32 = 1;
 const EVENT_TYPE_CONNECT: u32 = 2;
@@ -55,14 +56,10 @@ impl AgentConfig {
 
 async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        // Create a new channel for each connection attempt
-        let (tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE * 10);
+        let (tx, mut rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
         let tx = Arc::new(tokio::sync::Mutex::new(tx));
-        
-        // Clone for the BPF event processing task
         let tx_clone = tx.clone();
         
-        // Spawn BPF event processing task
         let _bpf_handle = tokio::spawn(async move {
             let mut monitor = SyscallMonitor::new().expect("Failed to create syscall monitor");
             monitor.attach().expect("Failed to attach BPF programs");
@@ -71,16 +68,12 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
             let tx = tx_clone.clone();
             let callback = move |data: &[u8]| {
                 if let Some(event) = parse_bpf_event(data) {
-                    debug!("Converting EventOutput (PID: {}) to SecurityEvent", event.pid);
-                    match convert_eventoutput_to_securityevent(&event) {
-                        Ok(security_event) => {
-                            if let Ok(sender) = tx.try_lock() {
-                                if let Err(_) = sender.try_send(security_event) {
-                                    warn!("Event channel full, dropping event: PID {}", event.pid);
-                                }
+                    if let Ok(security_event) = convert_eventoutput_to_securityevent(&event) {
+                        if let Ok(sender) = tx.try_lock() {
+                            if let Err(e) = sender.try_send(security_event) {
+                                warn!("Event channel error: {:?}", e);
                             }
                         }
-                        Err(e) => error!("Failed to convert event: {:?}", e),
                     }
                 }
                 0
@@ -101,19 +94,53 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
             Ok(channel) => {
                 info!("Connected to controller");
                 let mut client = TelemetryServiceClient::new(channel);
+                let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
+                let mut batch_timer = tokio::time::interval(EVENT_SEND_TIMEOUT);
                 
-                // Create stream from our receiver
-                let stream = ReceiverStream::new(rx);
-                
-                match client.stream_events(Request::new(stream)).await {
-                    Ok(response) => {
-                        info!("Stream completed successfully: {:?}", response.into_inner());
-                    }
-                    Err(status) => {
-                        error!("Stream error: {:?}", status);
-                        if status.code() == Code::Unavailable {
-                            info!("Server unavailable, will retry...");
+                loop {
+                    tokio::select! {
+                        _ = batch_timer.tick() => {
+                            if !events.is_empty() {
+                                let (batch_tx, batch_rx) = mpsc::channel(1);
+                                for event in events.drain(..) {
+                                    batch_tx.try_send(event).unwrap_or_else(|e| warn!("Failed to send to batch channel: {:?}", e));
+                                }
+                                let stream = ReceiverStream::new(batch_rx);
+                                
+                                match client.stream_events(Request::new(stream)).await {
+                                    Ok(_) => {
+                                        debug!("Batch of {} events sent successfully", events.capacity());
+                                    }
+                                    Err(status) => {
+                                        error!("Stream error: {:?}", status);
+                                        break;
+                                    }
+                                }
+                            }
                         }
+                        
+                        Some(event) = rx.recv() => {
+                            events.push(event);
+                            if events.len() >= EVENT_BATCH_SIZE {
+                                let (batch_tx, batch_rx) = mpsc::channel(1);
+                                for event in events.drain(..) {
+                                    batch_tx.try_send(event).unwrap_or_else(|e| warn!("Failed to send to batch channel: {:?}", e));
+                                }
+                                let stream = ReceiverStream::new(batch_rx);
+                                
+                                match client.stream_events(Request::new(stream)).await {
+                                    Ok(_) => {
+                                        debug!("Batch of {} events sent successfully", events.capacity());
+                                    }
+                                    Err(status) => {
+                                        error!("Stream error: {:?}", status);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        else => break
                     }
                 }
             }
