@@ -1,6 +1,6 @@
 use std::env;
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
@@ -23,8 +23,9 @@ use telemetry::{SecurityEvent, telemetry_service_client::TelemetryServiceClient}
 
 // Increased buffer sizes and timeouts
 const EVENT_CHANNEL_SIZE: usize = 50000;
-const EVENT_BATCH_SIZE: usize = 500;
-const BPF_POLL_TIMEOUT_MS: u32 = 100;
+const EVENT_BATCH_SIZE: usize = 1000;
+const EVENT_BATCH_TIMEOUT_MS: u64 = 1000; // Send batch after 1 second even if not full
+const BPF_POLL_TIMEOUT_MS: u32 = 1000;    // Poll every second instead of 100ms
 const RECONNECT_DELAY_MS: u64 = 5000;
 const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -136,15 +137,20 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                             // Create a stream from the receiver
                             let mut stream = ReceiverStream::new(rx);
                             let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
+                            let mut last_send = Instant::now();
 
                             while let Some(event) = stream.next().await {
                                 events.push(event);
-                                if events.len() >= EVENT_BATCH_SIZE {
+                                let should_send = events.len() >= EVENT_BATCH_SIZE || 
+                                                last_send.elapsed().as_millis() as u64 >= EVENT_BATCH_TIMEOUT_MS;
+                                
+                                if should_send && !events.is_empty() {
                                     let batch = std::mem::take(&mut events);
                                     let stream = stream::iter(batch);
                                     if let Err(e) = client.stream_events(Request::new(stream)).await {
                                         error!("Failed to send event batch: {}", e);
                                     }
+                                    last_send = Instant::now();
                                 }
                             }
 
