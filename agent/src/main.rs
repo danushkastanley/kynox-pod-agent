@@ -98,7 +98,7 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
 
                         // Only start collecting events if we're connected
                         if conn_manager.is_connected() {
-                            let (tx, mut rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
+                            let (tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
                             let tx = Arc::new(Mutex::new(tx));
                             let tx_clone = tx.clone();
                             

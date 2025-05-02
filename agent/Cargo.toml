@@ -23,6 +23,7 @@ prost-types = "0.12"
 tokio-stream = "0.1"
 futures = "0.3"
 uuid = { version = "1.4", features = ["v4"] }
+backoff = { version = "0.4", features = ["tokio"] }
 
 [build-dependencies]
 libbpf-cargo = "0.21"
