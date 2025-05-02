@@ -60,9 +60,15 @@ impl AgentConfig {
 
 async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        let endpoint = format!("http://{}", endpoint);
+        let endpoint = endpoint.clone();
         
-        match Channel::from_shared(endpoint.clone())?.connect().await {
+        let endpoint = format!("http://{}", endpoint);
+        let uri = format!("http://{}", endpoint);
+        
+        match Channel::builder()
+            .uri(uri)
+            .connect()
+            .await {
             Ok(channel) => {
                 info!("Channel established to controller");
                 let mut client = TelemetryServiceClient::new(channel.clone());
