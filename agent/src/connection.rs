@@ -40,7 +40,7 @@ impl ConnectionManager {
             pod_name: self.pod_name.clone(),
         });
 
-        match self.client.init_connection(request).await {
+        match self.client.connect_agent(request).await {
             Ok(response) => {
                 let response = response.into_inner();
                 if response.success {
