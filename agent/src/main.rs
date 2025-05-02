@@ -100,7 +100,8 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                                 info!("BPF programs attached successfully");
 
                                 let tx = tx_clone.clone();
-                                let _callback = move |data: &[u8]| {
+                                // Set up ring buffer callback
+                                monitor.setup_ring_buffer(move |data| {
                                     if let Some(event) = parse_bpf_event(data) {
                                         if let Ok(security_event) = convert_eventoutput_to_securityevent(&event) {
                                             let tx = tx.clone();
@@ -111,12 +112,14 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                                             });
                                         }
                                     }
-                                };
+                                    0
+                                }).expect("Failed to setup ring buffer");
 
+                                info!("Ring buffer setup complete, starting polling...");
+                                
                                 loop {
                                     if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
-                                        error!("Error polling events: {:?}", e);
-                                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                                        error!("Error polling events: {}", e);
                                     }
                                 }
                             });
