@@ -2,12 +2,16 @@ use std::env;
 use std::error::Error;
 use std::time::Duration;
 use std::sync::Arc;
-use std::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
-use tonic::{transport::Channel, Request, Status};
-use log::{warn, error, info, debug};
+use tonic::{transport::Channel, Request};
+use log::{error, info, debug};
+use futures::stream;
+
+mod connection;
+use connection::ConnectionManager;
 
 use agent_core::{SyscallMonitor, parse_bpf_event, EventOutput}; 
 
@@ -56,105 +60,99 @@ impl AgentConfig {
 
 async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        let endpoint = format!("http://{}", endpoint);  // Add http:// prefix for tonic
-        let (tx, mut rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
-        let tx = Arc::new(tokio::sync::Mutex::new(tx));
-        let tx_clone = tx.clone();
+        let endpoint = format!("http://{}", endpoint);
         
-        let _bpf_handle = tokio::spawn(async move {
-            let mut monitor = SyscallMonitor::new().expect("Failed to create syscall monitor");
-            monitor.attach().expect("Failed to attach BPF programs");
-            info!("BPF programs attached successfully");
+        match Channel::from_shared(endpoint.clone())?.connect().await {
+            Ok(channel) => {
+                info!("Channel established to controller");
+                let mut client = TelemetryServiceClient::new(channel.clone());
+                
+                // Create and connect the connection manager
+                let mut conn_manager = ConnectionManager::new(
+                    client.clone(),
+                    env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string()),
+                    env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string()),
+                );
 
-            let tx = tx_clone.clone();
-            let callback = move |data: &[u8]| {
-                if let Some(event) = parse_bpf_event(data) {
-                    if let Ok(security_event) = convert_eventoutput_to_securityevent(&event) {
-                        if let Ok(sender) = tx.try_lock() {
-                            match sender.try_send(security_event) {
-                                Ok(_) => (),
-                                Err(e) => {
-                                    match e {
-                                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                                            warn!("Event channel full - dropping event");
-                                        }
-                                        _ => {
-                                            warn!("Event channel error: {:?}", e);
+                match conn_manager.connect().await {
+                    Ok(true) => {
+                        info!("Successfully connected to controller");
+                        
+                        // Start heartbeat in separate task
+                        let mut conn_manager_heartbeat = conn_manager.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = conn_manager_heartbeat.start_heartbeat().await {
+                                error!("Heartbeat error: {}", e);
+                            }
+                        });
+
+                        // Only start collecting events if we're connected
+                        if conn_manager.is_connected() {
+                            let (tx, mut rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
+                            let tx = Arc::new(Mutex::new(tx));
+                            let tx_clone = tx.clone();
+                            
+                            let _bpf_handle = tokio::spawn(async move {
+                                let mut monitor = SyscallMonitor::new().expect("Failed to create syscall monitor");
+                                monitor.attach().expect("Failed to attach BPF programs");
+                                info!("BPF programs attached successfully");
+
+                                let tx = tx_clone.clone();
+                                let _callback = move |data: &[u8]| {
+                                    if let Some(event) = parse_bpf_event(data) {
+                                        if let Ok(security_event) = convert_eventoutput_to_securityevent(&event) {
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                if let Err(e) = tx.lock().await.send(security_event).await {
+                                                    error!("Failed to send event: {}", e);
+                                                }
+                                            });
                                         }
                                     }
+                                };
+
+                                loop {
+                                    if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
+                                        error!("Error polling events: {:?}", e);
+                                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                                    }
+                                }
+                            });
+
+                            // Create a stream from the receiver
+                            let mut stream = ReceiverStream::new(rx);
+                            let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
+
+                            while let Some(event) = stream.next().await {
+                                events.push(event);
+                                if events.len() >= EVENT_BATCH_SIZE {
+                                    let batch = std::mem::take(&mut events);
+                                    let stream = stream::iter(batch);
+                                    if let Err(e) = client.stream_events(Request::new(stream)).await {
+                                        error!("Failed to send event batch: {}", e);
+                                    }
+                                }
+                            }
+
+                            // Send any remaining events
+                            if !events.is_empty() {
+                                let stream = stream::iter(events);
+                                if let Err(e) = client.stream_events(Request::new(stream)).await {
+                                    error!("Failed to send remaining events: {}", e);
                                 }
                             }
                         }
                     }
-                }
-                0
-            };
-
-            monitor.setup_ring_buffer(callback).expect("Failed to setup ring buffer");
-            info!("Ring buffer setup complete");
-
-            loop {
-                if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
-                    error!("Error polling events: {:?}", e);
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
-                }
-            }
-        });
-
-        match Channel::from_shared(endpoint.clone())?.connect().await {
-            Ok(channel) => {
-                info!("Connected to controller");
-                let mut client = TelemetryServiceClient::new(channel);
-                let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
-                let mut batch_timer = tokio::time::interval(EVENT_SEND_TIMEOUT);
-                
-                loop {
-                    tokio::select! {
-                        _ = batch_timer.tick() => {
-                            if !events.is_empty() {
-                                let (_, batch_rx) = mpsc::channel(events.len());
-                                match client.stream_events(Request::new(ReceiverStream::new(
-                                    batch_rx
-                                ))).await {
-                                    Ok(_) => {
-                                        debug!("Sent {} events to controller", events.len());
-                                        events.clear();
-                                    },
-                                    Err(e) => {
-                                        error!("Failed to send events: {:?}", e);
-                                        // Don't clear events - they'll be retried
-                                        tokio::time::sleep(Duration::from_millis(1000)).await;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        Some(event) = rx.recv() => {
-                            events.push(event);
-                            if events.len() >= EVENT_BATCH_SIZE {
-                                let (_, batch_rx) = mpsc::channel(events.len());
-                                match client.stream_events(Request::new(ReceiverStream::new(
-                                    batch_rx
-                                ))).await {
-                                    Ok(_) => {
-                                        debug!("Sent {} events to controller", events.len());
-                                        events.clear();
-                                    },
-                                    Err(e) => {
-                                        error!("Failed to send events: {:?}", e);
-                                        // Don't clear events - they'll be retried
-                                        tokio::time::sleep(Duration::from_millis(1000)).await;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        else => break
+                    Ok(false) => {
+                        error!("Connection rejected by controller");
+                    }
+                    Err(e) => {
+                        error!("Failed to establish connection: {}", e);
                     }
                 }
             }
             Err(e) => {
-                error!("Connection failed: {:?}", e);
+                error!("Channel connection failed: {:?}", e);
                 error!("Connection details: Endpoint={}, Error={:#?}", endpoint, e);
                 
                 // Try DNS resolution
@@ -180,9 +178,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Starting RASP Pod Agent...");
 
     let config = Arc::new(Mutex::new(AgentConfig::load()));
-    info!("Configuration loaded: {:?}", config.lock().unwrap());
+    info!("Configuration loaded: {:?}", config.lock().await);
     
-    let endpoint = config.lock().unwrap().controller_endpoint.clone();
+    let endpoint = config.lock().await.controller_endpoint.clone();
     info!("Attempting to connect to controller at: {}", endpoint);
     
     // Run the event sender

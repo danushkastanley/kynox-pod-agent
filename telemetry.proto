@@ -4,6 +4,38 @@ package telemetry;
 
 import "google/protobuf/timestamp.proto";
 
+// Connection status for an agent
+message ConnectionStatus {
+  enum Status {
+    CONNECTED = 0;
+    DISCONNECTED = 1;
+    ERROR = 2;
+  }
+  Status status = 1;
+  string agent_id = 2;
+  string error_message = 3;
+}
+
+// Connection request from agent
+message ConnectRequest {
+  string agent_id = 1;
+  string node_name = 2;
+  string pod_name = 3;
+}
+
+// Connection response from controller
+message ConnectResponse {
+  bool success = 1;
+  string error_message = 2;
+  string session_id = 3;
+}
+
+// Heartbeat message
+message Heartbeat {
+  string agent_id = 1;
+  string session_id = 2;
+}
+
 enum EventType {
   EVENT_TYPE_UNSPECIFIED = 0;
   EXEC = 1;
@@ -33,6 +65,7 @@ enum EventType {
   RECV = 22;
 }
 
+// Security event message
 message SecurityEvent {
   EventType event_type = 1;
   int32 pid = 2;
@@ -55,14 +88,20 @@ message SecurityEvent {
   map<string, string> container_context = 20; // Optional: e.g., pod_name, namespace
 }
 
-// Service definition for the telemetry controller
-service TelemetryService {
-  // Streams security events from agent to controller
-  rpc StreamEvents(stream SecurityEvent) returns (SendEventsResponse);
-}
-
-// Response message for SendEvents (can be simple acknowledgement)
+// Response for sending events
 message SendEventsResponse {
   bool success = 1;
-  string message = 2; // Optional: status message
+  string error_message = 2;
+}
+
+// Telemetry service definition
+service TelemetryService {
+  // Establish connection with controller
+  rpc InitConnection(ConnectRequest) returns (ConnectResponse);
+  
+  // Maintain connection with heartbeat
+  rpc SendHeartbeat(Heartbeat) returns (ConnectionStatus);
+  
+  // Stream security events from agent to controller
+  rpc StreamEvents(stream SecurityEvent) returns (SendEventsResponse);
 }
