@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::telemetry::{
     telemetry_service_client::TelemetryServiceClient,
-    ConnectRequest, Heartbeat, ConnectionStatus,
+    ConnectRequest, Heartbeat,
 };
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);

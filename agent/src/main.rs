@@ -62,13 +62,9 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
     loop {
         let endpoint = endpoint.clone();
         
-        let endpoint = format!("http://{}", endpoint);
         let uri = format!("http://{}", endpoint);
         
-        match Channel::builder()
-            .uri(uri)
-            .connect()
-            .await {
+        match Channel::from_shared(uri)?.connect().await {
             Ok(channel) => {
                 info!("Channel established to controller");
                 let mut client = TelemetryServiceClient::new(channel.clone());
