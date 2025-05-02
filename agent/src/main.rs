@@ -59,6 +59,7 @@ impl AgentConfig {
 }
 
 async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut reconnect_delay = RECONNECT_DELAY_MS;
     loop {
         let endpoint = endpoint.clone();
         
@@ -83,8 +84,15 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                         // Start heartbeat in separate task
                         let mut conn_manager_heartbeat = conn_manager.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = conn_manager_heartbeat.start_heartbeat().await {
-                                error!("Heartbeat error: {}", e);
+                            loop {
+                                match conn_manager_heartbeat.start_heartbeat().await {
+                                    Ok(_) => (),
+                                    Err(e) => {
+                                        error!("Heartbeat error: {}", e);
+                                        // Add delay before retrying heartbeat
+                                        tokio::time::sleep(Duration::from_secs(5)).await;
+                                    }
+                                }
                             }
                         });
 
@@ -169,11 +177,17 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                 } else {
                     error!("Failed to resolve controller DNS name");
                 }
+
+                // Add exponential backoff for retries
+                tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
+                reconnect_delay *= 2;
+                if reconnect_delay > 30000 {
+                    reconnect_delay = 30000;
+                }
             }
         }
         
         info!("Waiting before reconnection attempt...");
-        tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
     }
 }
 

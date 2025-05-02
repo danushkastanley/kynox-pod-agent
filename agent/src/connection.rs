@@ -1,9 +1,9 @@
-use std::error::Error;
 use std::time::Duration;
 use tokio::time;
 use tonic::{transport::Channel, Request};
 use log::{info, error, warn};
 use uuid::Uuid;
+use anyhow::Error as AnyhowError;
 
 use crate::telemetry::{
     telemetry_service_client::TelemetryServiceClient,
@@ -33,7 +33,7 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn connect(&mut self) -> Result<bool, Box<dyn Error>> {
+    pub async fn connect(&mut self) -> Result<bool, AnyhowError> {
         let request = Request::new(ConnectRequest {
             agent_id: self.agent_id.clone(),
             node_name: self.node_name.clone(),
@@ -55,12 +55,12 @@ impl ConnectionManager {
             }
             Err(e) => {
                 error!("Failed to connect to controller: {}", e);
-                Err(Box::new(e))
+                Err(e.into())
             }
         }
     }
 
-    pub async fn start_heartbeat(&mut self) -> Result<(), Box<dyn Error>> {
+    pub async fn start_heartbeat(&mut self) -> Result<(), AnyhowError> {
         let mut interval = time::interval(HEARTBEAT_INTERVAL);
 
         loop {
@@ -81,26 +81,26 @@ impl ConnectionManager {
                             }
                             2 => { // ERROR
                                 error!("Heartbeat error: {}", status.error_message);
-                                return Err("Connection lost".into());
+                                return Err(anyhow::anyhow!("Connection lost"));
                             }
                             1 => { // DISCONNECTED
                                 warn!("Controller reports disconnected state");
-                                return Err("Disconnected by controller".into());
+                                return Err(anyhow::anyhow!("Disconnected by controller"));
                             }
                             _ => {
                                 error!("Invalid status received");
-                                return Err("Invalid status".into());
+                                return Err(anyhow::anyhow!("Invalid status"));
                             }
                         }
                     }
                     Err(e) => {
                         error!("Failed to send heartbeat: {}", e);
-                        return Err(Box::new(e));
+                        return Err(e.into());
                     }
                 }
             } else {
                 error!("No session ID available for heartbeat");
-                return Err("No active session".into());
+                return Err(anyhow::anyhow!("No active session"));
             }
         }
     }
