@@ -193,7 +193,18 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    // Initialize logging with custom filter
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        // Only show logs from our crate and agent_core
+        .filter_module("agent", log::LevelFilter::Debug)
+        .filter_module("agent_core", log::LevelFilter::Debug)
+        // Filter out noisy tonic logs
+        .filter_module("tonic", log::LevelFilter::Warn)
+        .filter_module("h2", log::LevelFilter::Warn)
+        .filter_module("tower", log::LevelFilter::Warn)
+        .init();
+
     info!("Starting RASP Pod Agent...");
 
     let config = Arc::new(Mutex::new(AgentConfig::load()));
