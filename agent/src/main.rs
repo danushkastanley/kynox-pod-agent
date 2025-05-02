@@ -64,6 +64,7 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
         let endpoint = endpoint.clone();
         
         let uri = format!("http://{}", endpoint);
+        info!("Attempting to connect to {}", uri);
         
         match Channel::from_shared(uri)?.connect().await {
             Ok(channel) => {
@@ -83,14 +84,14 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                         
                         // Start heartbeat in separate task
                         let mut conn_manager_heartbeat = conn_manager.clone();
-                        tokio::spawn(async move {
+                        let heartbeat_handle = tokio::spawn(async move {
                             loop {
                                 match conn_manager_heartbeat.start_heartbeat().await {
                                     Ok(_) => (),
                                     Err(e) => {
                                         error!("Heartbeat error: {}", e);
-                                        // Add delay before retrying heartbeat
-                                        tokio::time::sleep(Duration::from_secs(5)).await;
+                                        // Break the loop on error to trigger reconnection
+                                        break;
                                     }
                                 }
                             }
@@ -154,40 +155,49 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                                     error!("Failed to send remaining events: {}", e);
                                 }
                             }
+                        } else {
+                            error!("Failed to establish initial connection");
                         }
+
+                        // Wait for either heartbeat to fail or events to complete
+                        tokio::select! {
+                            _ = heartbeat_handle => {
+                                error!("Heartbeat task ended, triggering reconnection");
+                            }
+                            _ = async {
+                                // Add other error conditions here
+                            } => {}
+                        }
+
+                        // Reset reconnect delay on successful connection
+                        reconnect_delay = RECONNECT_DELAY_MS;
                     }
                     Ok(false) => {
                         error!("Connection rejected by controller");
                     }
                     Err(e) => {
-                        error!("Failed to establish connection: {}", e);
+                        error!("Failed to connect: {}", e);
                     }
                 }
             }
             Err(e) => {
-                error!("Channel connection failed: {:?}", e);
-                error!("Connection details: Endpoint={}, Error={:#?}", endpoint, e);
-                
-                // Try DNS resolution
-                if let Ok(addrs) = tokio::net::lookup_host("rasp-controller.default.svc:50051").await {
-                    info!("DNS lookup results for controller:");
-                    for addr in addrs {
-                        info!("  Found address: {}", addr);
-                    }
-                } else {
-                    error!("Failed to resolve controller DNS name");
-                }
-
-                // Add exponential backoff for retries
-                tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
-                reconnect_delay *= 2;
-                if reconnect_delay > 30000 {
-                    reconnect_delay = 30000;
-                }
+                error!("Failed to establish channel: {}", e);
             }
         }
         
-        info!("Waiting before reconnection attempt...");
+        info!("Waiting {} ms before reconnection attempt...", reconnect_delay);
+        tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
+        reconnect_delay = std::cmp::min(reconnect_delay * 2, 30000);
+
+        // Try DNS resolution
+        if let Ok(addrs) = tokio::net::lookup_host("rasp-controller.default.svc:50051").await {
+            info!("DNS lookup results for controller:");
+            for addr in addrs {
+                info!("  Found address: {}", addr);
+            }
+        } else {
+            error!("Failed to resolve controller DNS name");
+        }
     }
 }
 
