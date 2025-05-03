@@ -1,12 +1,12 @@
 use std::env;
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
-use tonic::{transport::Channel, Request, Code};
+use tonic::Request;
 use tonic::transport::Endpoint;
 use log::{error, info, debug, warn};
 use env_logger::{Builder, Env};
@@ -16,7 +16,7 @@ use std::io::Write;
 mod connection;
 use connection::ConnectionManager;
 
-use agent_core::{SyscallMonitor, parse_bpf_event, EventOutput}; 
+use agent_core::{SyscallMonitor, EventOutput}; 
 
 pub mod telemetry {
     tonic::include_proto!("telemetry");
@@ -24,14 +24,32 @@ pub mod telemetry {
 
 use telemetry::{SecurityEvent, telemetry_service_client::TelemetryServiceClient};
 
-// Increased buffer sizes and timeouts
-const EVENT_CHANNEL_SIZE: usize = 100000;  // Doubled buffer size
-const EVENT_BATCH_SIZE: usize = 2000;      // Doubled batch size
-const EVENT_BATCH_TIMEOUT_MS: u64 = 1000;  // Send batch after 1 second
-const BPF_POLL_TIMEOUT_MS: u32 = 1000;     // Poll every second
-const RECONNECT_DELAY_MS: u64 = 5000;
-const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(1000); // Increased timeout
-const MAX_RETRIES: usize = 3;              // Max retries for sending events
+// Event types
+const EVENT_TYPE_EXEC: u32 = 0;
+const EVENT_TYPE_OPEN: u32 = 1;
+const EVENT_TYPE_CONNECT: u32 = 2;
+const EVENT_TYPE_FORK: u32 = 3;
+const EVENT_TYPE_PTRACE: u32 = 4;
+const EVENT_TYPE_SETUID: u32 = 5;
+const EVENT_TYPE_SETGID: u32 = 6;
+const EVENT_TYPE_MOUNT: u32 = 7;
+const EVENT_TYPE_UMOUNT: u32 = 8;
+const EVENT_TYPE_CAPSET: u32 = 9;
+const EVENT_TYPE_BPF_PROG: u32 = 10;
+const EVENT_TYPE_SECCOMP: u32 = 11;
+const EVENT_TYPE_SOCKET: u32 = 12;
+const EVENT_TYPE_BIND: u32 = 13;
+const EVENT_TYPE_ACCEPT: u32 = 14;
+const EVENT_TYPE_CHMOD: u32 = 15;
+
+// Original buffer sizes and timeouts
+const EVENT_CHANNEL_SIZE: usize = 50000;  
+const EVENT_BATCH_SIZE: usize = 1000;      
+const EVENT_BATCH_TIMEOUT_MS: u64 = 500;  
+const BPF_POLL_TIMEOUT_MS: u32 = 500;     
+const RECONNECT_DELAY_MS: u64 = 1000;
+const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500); 
+const MAX_RETRIES: usize = 3;             
 
 #[derive(Debug, Clone)]
 struct AgentConfig {
@@ -101,15 +119,39 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                             // Start event collection
                             let (tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
                             let monitor = Arc::new(StdMutex::new(SyscallMonitor::new()?));
+                            monitor.lock().unwrap().attach()?;  // Attach BPF program
                             
                             // Event collection task
                             let monitor_clone = monitor.clone();
                             let tx_clone = tx.clone();
                             let conn_manager_clone = conn_manager.clone();
+
+                            // Set up ring buffer with callback
+                            {
+                                let tx_clone = tx_clone.clone();
+                                let conn_manager_clone = conn_manager_clone.clone();
+                                let mut guard = monitor_clone.lock().unwrap();
+                                guard.setup_ring_buffer(move |data| {
+                                    if let Some(event_output) = agent_core::syscalls::parse_bpf_event(data) {
+                                        match convert_eventoutput_to_securityevent(&event_output, &conn_manager_clone) {
+                                            Ok(event) => {
+                                                let tx = tx_clone.clone();
+                                                tokio::spawn(async move {
+                                                    match tokio::time::timeout(EVENT_SEND_TIMEOUT, tx.send(event)).await {
+                                                        Ok(Ok(_)) => debug!("Event sent to channel"),
+                                                        Ok(Err(e)) => error!("Failed to send event to channel: {}", e),
+                                                        Err(_) => warn!("Event send timed out"),
+                                                    }
+                                                });
+                                            }
+                                            Err(e) => error!("Failed to convert event: {}", e),
+                                        }
+                                    }
+                                    0 // Continue processing events
+                                })?;
+                            }
                             
                             tokio::spawn(async move {
-                                let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
-                                let mut last_send = Instant::now();
                                 let mut consecutive_errors = 0;
                                 
                                 loop {
@@ -120,34 +162,23 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                                         continue;
                                     }
 
-                                    // Poll for events
-                                    if let Ok(event_output) = monitor_clone.lock().unwrap().poll_events(BPF_POLL_TIMEOUT_MS) {
-                                        match convert_eventoutput_to_securityevent(&event_output, &conn_manager_clone) {
-                                            Ok(event) => {
-                                                // Try to send with timeout
-                                                match tokio::time::timeout(EVENT_SEND_TIMEOUT, tx_clone.send(event)).await {
-                                                    Ok(Ok(_)) => {
-                                                        // Event sent successfully
-                                                        consecutive_errors = 0;
-                                                    }
-                                                    Ok(Err(e)) => {
-                                                        error!("Failed to send event to channel: {}", e);
-                                                        consecutive_errors += 1;
-                                                    }
-                                                    Err(_) => {
-                                                        warn!("Event send timed out, applying backpressure");
-                                                        consecutive_errors += 1;
-                                                    }
-                                                }
-
-                                                // If too many consecutive errors, slow down
-                                                if consecutive_errors > MAX_RETRIES {
-                                                    warn!("Too many consecutive errors, slowing down event collection");
-                                                    tokio::time::sleep(Duration::from_secs(1)).await;
-                                                    consecutive_errors = 0;
-                                                }
+                                    // Poll for events - release guard before await
+                                    let poll_result = monitor_clone.lock().unwrap().poll(BPF_POLL_TIMEOUT_MS);
+                                    match poll_result {
+                                        Ok(_) => {
+                                            // Poll successful, reset error count
+                                            consecutive_errors = 0;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to poll events: {}", e);
+                                            consecutive_errors += 1;
+                                            if consecutive_errors > MAX_RETRIES {
+                                                warn!("Too many consecutive errors, slowing down event collection");
+                                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                                consecutive_errors = 0;
+                                            } else {
+                                                tokio::time::sleep(Duration::from_millis(100)).await;
                                             }
-                                            Err(e) => error!("Failed to convert event: {}", e),
                                         }
                                     }
                                 }
@@ -159,10 +190,13 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                             while let Some(event) = stream.next().await {
                                 let mut events = vec![event];
                                 
-                                // Collect more events if available
+                                // Collect more events if available (with timeout)
                                 while events.len() < EVENT_BATCH_SIZE {
-                                    match stream.next().now_or_never() {
-                                        Some(Some(event)) => events.push(event),
+                                    match tokio::time::timeout(
+                                        Duration::from_millis(10), 
+                                        stream.next()
+                                    ).await {
+                                        Ok(Some(event)) => events.push(event),
                                         _ => break,
                                     }
                                 }
@@ -254,21 +288,22 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
     debug!("Converting EventOutput (PID: {}) to SecurityEvent", event.pid);
 
     let event_type_proto = match event.event_type {
-        0 => telemetry::EventType::Exec as i32,
-        1 => telemetry::EventType::Open as i32,
-        2 => telemetry::EventType::Connect as i32,
-        3 => telemetry::EventType::Fork as i32,
-        4 => telemetry::EventType::Ptrace as i32,
-        5 => telemetry::EventType::Setuid as i32,
-        6 => telemetry::EventType::Setgid as i32,
-        7 => telemetry::EventType::Mount as i32,
-        8 => telemetry::EventType::Umount as i32,
-        9 => telemetry::EventType::Capset as i32,
-        10 => telemetry::EventType::BpfProg as i32,
-        11 => telemetry::EventType::Seccomp as i32,
-        12 => telemetry::EventType::Socket as i32,
-        13 => telemetry::EventType::Bind as i32,
-        14 => telemetry::EventType::Accept as i32,
+        EVENT_TYPE_EXEC => telemetry::EventType::Exec as i32,
+        EVENT_TYPE_OPEN => telemetry::EventType::Open as i32,
+        EVENT_TYPE_CONNECT => telemetry::EventType::Connect as i32,
+        EVENT_TYPE_FORK => telemetry::EventType::Fork as i32,
+        EVENT_TYPE_PTRACE => telemetry::EventType::Ptrace as i32,
+        EVENT_TYPE_SETUID => telemetry::EventType::Setuid as i32,
+        EVENT_TYPE_SETGID => telemetry::EventType::Setgid as i32,
+        EVENT_TYPE_MOUNT => telemetry::EventType::Mount as i32,
+        EVENT_TYPE_UMOUNT => telemetry::EventType::Umount as i32,
+        EVENT_TYPE_CAPSET => telemetry::EventType::Capset as i32,
+        EVENT_TYPE_BPF_PROG => telemetry::EventType::BpfProg as i32,
+        EVENT_TYPE_SECCOMP => telemetry::EventType::Seccomp as i32,
+        EVENT_TYPE_SOCKET => telemetry::EventType::Socket as i32,
+        EVENT_TYPE_BIND => telemetry::EventType::Bind as i32,
+        EVENT_TYPE_ACCEPT => telemetry::EventType::Accept as i32,
+        EVENT_TYPE_CHMOD => telemetry::EventType::Open as i32, // Map chmod to Open for now
         _ => return Err("Unknown event type".into()),
     };
 
@@ -285,22 +320,22 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         ppid: event.parent_pid.unwrap_or(0) as i32,
         command: event.comm.clone(),
         file_path: event.filename.as_ref().map_or_else(String::new, |s| s.clone()),
-        destination_ip: if event.event_type == 2 {
+        destination_ip: if event.event_type == EVENT_TYPE_CONNECT {
             event.daddr.as_ref().map_or_else(String::new, |s| s.clone())
         } else {
             String::new()
         },
-        destination_port: if event.event_type == 2 {
+        destination_port: if event.event_type == EVENT_TYPE_CONNECT {
             event.dport.unwrap_or(0) as i32
         } else {
             0
         },
-        source_ip: if event.event_type == 14 {
+        source_ip: if event.event_type == EVENT_TYPE_ACCEPT {
             event.daddr.as_ref().map_or_else(String::new, |s| s.clone())
         } else {
             String::new()
         },
-        source_port: if event.event_type == 14 {
+        source_port: if event.event_type == EVENT_TYPE_ACCEPT {
             event.dport.unwrap_or(0) as i32
         } else {
             0
