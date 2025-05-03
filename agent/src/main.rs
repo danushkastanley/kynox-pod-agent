@@ -94,7 +94,7 @@ async fn connect_and_run(uri: &str) -> Result<(), Box<dyn Error + Send + Sync>> 
         .await?;
 
     info!("Channel established to controller");
-    let client = TelemetryServiceClient::new(channel.clone());
+    let mut client = TelemetryServiceClient::new(channel.clone());
     
     // Create and connect the connection manager
     let mut conn_manager = ConnectionManager::new(
@@ -153,7 +153,6 @@ async fn connect_and_run(uri: &str) -> Result<(), Box<dyn Error + Send + Sync>> 
             });
 
             // Start event processing
-            let mut batch = Vec::with_capacity(EVENT_BATCH_SIZE);
             let mut stream = ReceiverStream::new(event_rx);
 
             while let Some(event) = stream.next().await {
@@ -164,25 +163,23 @@ async fn connect_and_run(uri: &str) -> Result<(), Box<dyn Error + Send + Sync>> 
 
                 match convert_eventoutput_to_securityevent(&event, &conn_manager) {
                     Ok(security_event) => {
-                        batch.push(security_event);
-                        
-                        if batch.len() >= EVENT_BATCH_SIZE {
-                            let events_request = Request::new(stream::iter(batch.drain(..)));
+                        // Try to send event with retries
+                        for attempt in 1..=MAX_RETRIES {
+                            // Create a new request for each attempt
+                            let events = vec![security_event.clone()];
+                            let events_request = Request::new(stream::iter(events));
                             
-                            // Try to send events with retries
-                            for attempt in 1..=MAX_RETRIES {
-                                match client.stream_events(events_request.clone()).await {
-                                    Ok(_) => {
-                                        debug!("Successfully sent events batch");
-                                        break;
+                            match client.stream_events(events_request).await {
+                                Ok(_) => {
+                                    debug!("Successfully sent event");
+                                    break;
+                                }
+                                Err(e) => {
+                                    error!("Failed to send event (attempt {}/{}): {}", attempt, MAX_RETRIES, e);
+                                    if attempt == MAX_RETRIES {
+                                        return Err(Box::new(e));
                                     }
-                                    Err(e) => {
-                                        error!("Failed to send events batch (attempt {}/{}): {}", attempt, MAX_RETRIES, e);
-                                        if attempt == MAX_RETRIES {
-                                            return Err(Box::new(e));
-                                        }
-                                        tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
-                                    }
+                                    tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
                                 }
                             }
                         }
