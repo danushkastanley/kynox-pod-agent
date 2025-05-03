@@ -115,7 +115,7 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                                 // Set up ring buffer callback
                                 monitor.setup_ring_buffer(move |data| {
                                     if let Some(event) = parse_bpf_event(data) {
-                                        if let Ok(security_event) = convert_eventoutput_to_securityevent(&event) {
+                                        if let Ok(security_event) = convert_eventoutput_to_securityevent(&event, &conn_manager) {
                                             let tx = tx.clone();
                                             tokio::spawn(async move {
                                                 if let Err(e) = tx.lock().await.send(security_event).await {
@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 // Helper function to convert EventOutput to SecurityEvent
-fn convert_eventoutput_to_securityevent(event: &EventOutput) -> Result<SecurityEvent, Box<dyn Error>> {
+fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &ConnectionManager) -> Result<SecurityEvent, Box<dyn Error>> {
     debug!("Converting EventOutput (PID: {}) to SecurityEvent", event.pid);
 
     let event_type_proto = match event.event_type {
@@ -269,6 +269,9 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput) -> Result<SecurityE
         EVENT_TYPE_ACCEPT => telemetry::EventType::Accept as i32,
         _ => return Err("Unknown event type".into()),
     };
+
+    let mut container_context = std::collections::HashMap::new();
+    container_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
 
     Ok(SecurityEvent {
         timestamp: Some(Timestamp {
@@ -304,6 +307,6 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput) -> Result<SecurityE
         gid: event.gid.unwrap_or(0) as i32,
         ptrace_request: event.ptrace_request.map(|r| r as i64).unwrap_or(-1),
         ptrace_target_pid: event.ptrace_target_pid.map(|p| p as i32).unwrap_or(-1),
-        container_context: Default::default(),
+        container_context,
     })
 }
