@@ -7,6 +7,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
 use tonic::{transport::Channel, Request, Code};
+use tonic::transport::Endpoint;
 use log::{error, info, debug};
 use env_logger::{Builder, Env};
 use futures::stream;
@@ -69,7 +70,14 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
         let uri = format!("http://{}", endpoint);
         info!("Attempting to connect to {}", uri);
         
-        match Channel::from_shared(uri)?.connect().await {
+        let channel = Endpoint::from_shared(uri)?
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .tcp_nodelay(true)
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await;
+
+        match channel {
             Ok(channel) => {
                 info!("Channel established to controller");
                 let mut client = TelemetryServiceClient::new(channel.clone());
