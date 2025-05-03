@@ -1,21 +1,21 @@
 use std::env;
 use std::error::Error;
-use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::ReceiverStream;
-use prost_types::Timestamp;
-use tonic::{transport::Channel, Request, Code};
-use log::{error, info, debug};
+use std::time::Duration;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
+use tonic::Request;
+use tonic::transport::Endpoint;
+use log::{error, info, debug, warn};
 use env_logger::{Builder, Env};
-use futures::stream;
 use std::io::Write;
+use async_stream::stream;
+use prost_types::Timestamp;
+use tokio_stream::StreamExt;
 
 mod connection;
 use connection::ConnectionManager;
 
-use agent_core::{SyscallMonitor, parse_bpf_event, EventOutput}; 
+use agent_core::{SyscallMonitor, EventOutput}; 
 
 pub mod telemetry {
     tonic::include_proto!("telemetry");
@@ -23,14 +23,9 @@ pub mod telemetry {
 
 use telemetry::{SecurityEvent, telemetry_service_client::TelemetryServiceClient};
 
-// Increased buffer sizes and timeouts
-const EVENT_CHANNEL_SIZE: usize = 50000;
-const EVENT_BATCH_SIZE: usize = 1000;
-const EVENT_BATCH_TIMEOUT_MS: u64 = 1000; // Send batch after 1 second even if not full
-const BPF_POLL_TIMEOUT_MS: u32 = 1000;    // Poll every second instead of 100ms
-const RECONNECT_DELAY_MS: u64 = 5000;
-const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
+// Event types
 const EVENT_TYPE_EXEC: u32 = 0;
 const EVENT_TYPE_OPEN: u32 = 1;
 const EVENT_TYPE_CONNECT: u32 = 2;
@@ -46,6 +41,16 @@ const EVENT_TYPE_SECCOMP: u32 = 11;
 const EVENT_TYPE_SOCKET: u32 = 12;
 const EVENT_TYPE_BIND: u32 = 13;
 const EVENT_TYPE_ACCEPT: u32 = 14;
+const EVENT_TYPE_CHMOD: u32 = 15;
+
+// Original buffer sizes and timeouts
+const EVENT_CHANNEL_SIZE: usize = 50000;  
+const EVENT_BATCH_SIZE: usize = 1000;      
+const EVENT_BATCH_TIMEOUT_MS: u64 = 500;  
+const BPF_POLL_TIMEOUT_MS: u32 = 500;     
+const RECONNECT_DELAY_MS: u64 = 1000;
+const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500); 
+const MAX_RETRIES: usize = 3;             
 
 #[derive(Debug, Clone)]
 struct AgentConfig {
@@ -61,143 +66,185 @@ impl AgentConfig {
     }
 }
 
-async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut reconnect_delay = RECONNECT_DELAY_MS;
+async fn run_event_sender(endpoint: String) -> Result<(), BoxError> {
     loop {
         let endpoint = endpoint.clone();
+        info!("Attempting to connect to controller at {}", endpoint);
         
         let uri = format!("http://{}", endpoint);
-        info!("Attempting to connect to {}", uri);
-        
-        match Channel::from_shared(uri)?.connect().await {
-            Ok(channel) => {
-                info!("Channel established to controller");
-                let mut client = TelemetryServiceClient::new(channel.clone());
-                
-                // Create and connect the connection manager
-                let mut conn_manager = ConnectionManager::new(
-                    client.clone(),
-                    env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string()),
-                    env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string()),
-                );
+        match connect_and_run(uri).await {
+            Ok(_) => {
+                warn!("Connection closed, attempting to reconnect in {} ms...", RECONNECT_DELAY_MS);
+                tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+            }
+            Err(e) => {
+                error!("Connection error: {}", e);
+                warn!("Retrying connection in {} ms...", RECONNECT_DELAY_MS);
+                tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+            }
+        }
+    }
+}
 
-                match conn_manager.connect().await {
-                    Ok(true) => {
-                        info!("Successfully connected to controller");
-                        
-                        // Start heartbeat in separate task
-                        let mut conn_manager_heartbeat = conn_manager.clone();
-                        let heartbeat_handle = tokio::spawn(async move {
-                            loop {
-                                match conn_manager_heartbeat.start_heartbeat().await {
-                                    Ok(_) => (),
-                                    Err(e) => {
-                                        error!("Heartbeat error: {}", e);
-                                        // Break the loop on error to trigger reconnection
-                                        break;
-                                    }
-                                }
-                            }
-                        });
+async fn connect_and_run(uri: String) -> Result<(), BoxError> {
+    let endpoint = match Endpoint::from_shared(uri.clone()) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            error!("Failed to create endpoint: {}", e);
+            return Err(Box::new(e));
+        }
+    };
 
-                        // Wait for a successful heartbeat before starting event collection
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        
-                        // Only start collecting events if we're still connected
-                        if conn_manager.is_connected() {
-                            let (tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
-                            let tx = Arc::new(StdMutex::new(tx));
-                            let tx_clone = tx.clone();
-                            
-                            // Start BPF event collection
-                            let mut monitor = SyscallMonitor::new()?;
-                            monitor.attach()?;
-                            
-                            let tx_clone = tx_clone.clone();
-                            let conn_manager = conn_manager.clone();
-                            monitor.setup_ring_buffer(move |data| {
-                                if let Some(event) = parse_bpf_event(data) {
-                                    if let Ok(security_event) = convert_eventoutput_to_securityevent(&event, &conn_manager) {
-                                        if let Ok(tx) = tx_clone.lock() {
-                                            if let Err(e) = tx.try_send(security_event) {
-                                                error!("Failed to send event to channel: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                0
-                            })?;
+    let channel = match endpoint
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .tcp_nodelay(true)
+        .timeout(Duration::from_secs(10))
+        .connect()
+        .await {
+        Ok(channel) => channel,
+        Err(e) => {
+            error!("Failed to connect to endpoint: {}", e);
+            return Err(Box::new(e));
+        }
+    };
 
-                            // Start polling in a loop
-                            loop {
-                                if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
-                                    error!("Error polling events: {}", e);
+    info!("Channel established to controller");
+    let client = TelemetryServiceClient::new(channel.clone());
+    
+    // Create and connect the connection manager
+    let mut conn_manager = ConnectionManager::new(
+        client.clone(),
+        env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string()),
+    );
+
+    match conn_manager.connect().await {
+        Ok(true) => {
+            info!("Successfully connected to controller");
+            
+            // Create channels for event communication
+            let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+            
+            // Start the heartbeat task in a separate task
+            let mut heartbeat_manager = conn_manager.clone();
+            tokio::spawn(async move {
+                if let Err(e) = heartbeat_manager.start_heartbeat().await {
+                    error!("Heartbeat task failed: {}", e);
+                }
+            });
+            
+            // Start the syscall monitor
+            let mut monitor = SyscallMonitor::new()?;
+            monitor.attach()?;
+            
+            // Set up ring buffer with callback
+            let tx = event_tx.clone();
+            monitor.setup_ring_buffer(move |data| {
+                if let Some(event_output) = agent_core::syscalls::parse_bpf_event(data) {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = tx.send(event_output).await {
+                            error!("Failed to send event: {}", e);
+                        }
+                    });
+                }
+                0 // Continue processing events
+            })?;
+            
+            // Spawn event collection task
+            let collection_handle = tokio::spawn(async move {
+                loop {
+                    if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
+                        error!("Event collection error: {}", e);
+                        break;
+                    }
+                }
+            });
+
+            // Start event processing
+            let mut client = client.clone();
+            let conn_manager = Arc::new(Mutex::new(conn_manager));
+            let conn_manager_clone = Arc::clone(&conn_manager);
+            
+            let events_stream = stream! {
+                let mut rx = tokio_stream::wrappers::ReceiverStream::new(event_rx);
+                while let Some(event) = rx.next().await {
+                    let conn_guard = conn_manager_clone.lock().await;
+                    if !conn_guard.is_connected() {
+                        error!("Lost connection to controller, attempting reconnect...");
+                        drop(conn_guard); // Release lock before reconnect
+
+                        // Try to reconnect
+                        let mut retry_count = 0;
+                        let mut reconnected = false;
+                        while retry_count < MAX_RETRIES {
+                            let mut conn_guard = conn_manager_clone.lock().await;
+                            match conn_guard.connect().await {
+                                Ok(true) => {
+                                    info!("Successfully reconnected to controller");
+                                    reconnected = true;
                                     break;
                                 }
-                            }
-
-                            // Start event batch processing
-                            let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
-                            let mut last_send = Instant::now();
-                            let mut rx = ReceiverStream::new(rx);
-
-                            while let Some(event) = rx.next().await {
-                                events.push(event);
-                                let should_send = events.len() >= EVENT_BATCH_SIZE || 
-                                    last_send.elapsed() >= Duration::from_millis(EVENT_BATCH_TIMEOUT_MS);
-
-                                if should_send && !events.is_empty() {
-                                    let batch = std::mem::take(&mut events);
-                                    let stream = stream::iter(batch);
-                                    match client.stream_events(Request::new(stream)).await {
-                                        Ok(_) => {
-                                            debug!("Successfully sent event batch");
-                                            last_send = Instant::now();
-                                            reconnect_delay = RECONNECT_DELAY_MS; // Reset delay on success
-                                        }
-                                        Err(e) => {
-                                            if e.code() == Code::Unknown && e.message() == "EOF" {
-                                                // This is normal - server closed the stream after processing
-                                                debug!("Event batch processed by server");
-                                                last_send = Instant::now();
-                                                reconnect_delay = RECONNECT_DELAY_MS; // Reset delay on success
-                                            } else {
-                                                error!("Failed to send event batch: {}", e);
-                                                if e.code() == Code::FailedPrecondition {
-                                                    // Connection lost, break to trigger reconnect
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
+                                _ => {
+                                    retry_count += 1;
+                                    warn!("Reconnect attempt {} failed, retrying in {} ms...", retry_count, RECONNECT_DELAY_MS);
+                                    drop(conn_guard); // Release lock before sleep
+                                    tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
                                 }
                             }
+                        }
+                        if !reconnected {
+                            error!("Failed to reconnect after {} attempts", MAX_RETRIES);
+                            break;
+                        }
+                        continue; // Skip this event and try next one
+                    }
 
-                            // Clean up handles
-                            heartbeat_handle.abort();
+                    match convert_eventoutput_to_securityevent(&event, &*conn_guard) {
+                        Ok(security_event) => {
+                            yield security_event;
+                        }
+                        Err(e) => {
+                            error!("Failed to convert event: {}", e);
                         }
                     }
-                    Ok(false) => {
-                        error!("Failed to connect to controller - retrying in {} ms", reconnect_delay);
-                    }
-                    Err(e) => {
-                        error!("Connection error: {} - retrying in {} ms", e, reconnect_delay);
+                }
+            };
+
+            // Create a single stream request for all events
+            let stream_request = Request::new(events_stream);
+            match client.stream_events(stream_request).await {
+                Ok(_) => {
+                    debug!("Event stream completed successfully");
+                }
+                Err(e) => {
+                    error!("Event stream failed: {}", e);
+                    if e.to_string().contains("transport is closing") || 
+                       e.to_string().contains("channel closed") {
+                        // Let the outer loop handle reconnection
+                        return Err(Box::new(e));
                     }
                 }
             }
-            Err(e) => {
-                error!("Channel error: {} - retrying in {} ms", e, reconnect_delay);
-            }
-        }
 
-        tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
-        // Increase reconnect delay up to 30 seconds
-        reconnect_delay = std::cmp::min(reconnect_delay * 2, 30000);
+            // Wait for tasks to complete
+            collection_handle.abort();
+            
+            Ok(())
+        }
+        Ok(false) => {
+            error!("Failed to connect to controller");
+            Err("Connection failed".into())
+        }
+        Err(e) => {
+            error!("Connection error: {}", e);
+            Err(Box::new(e))
+        }
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), BoxError> {
     // Initialize logging based on DEBUG environment variable
     let env = Env::default()
         .filter_or("DEBUG", "info") // Use "info" level if DEBUG not set
@@ -220,10 +267,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting RASP Pod Agent...");
 
-    let config = Arc::new(StdMutex::new(AgentConfig::load()));
-    info!("Configuration loaded: {:?}", config.lock().unwrap());
+    let config = Arc::new(Mutex::new(AgentConfig::load()));
+    info!("Configuration loaded: {:?}", config.lock().await);
     
-    let endpoint = config.lock().unwrap().controller_endpoint.clone();
+    let endpoint = config.lock().await.controller_endpoint.clone();
     info!("Attempting to connect to controller at: {}", endpoint);
     
     // Run the event sender
@@ -235,7 +282,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 // Helper function to convert EventOutput to SecurityEvent
-fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &ConnectionManager) -> Result<SecurityEvent, Box<dyn Error>> {
+fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &ConnectionManager) -> Result<SecurityEvent, BoxError> {
     debug!("Converting EventOutput (PID: {}) to SecurityEvent", event.pid);
 
     let event_type_proto = match event.event_type {
@@ -254,6 +301,7 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         EVENT_TYPE_SOCKET => telemetry::EventType::Socket as i32,
         EVENT_TYPE_BIND => telemetry::EventType::Bind as i32,
         EVENT_TYPE_ACCEPT => telemetry::EventType::Accept as i32,
+        EVENT_TYPE_CHMOD => telemetry::EventType::Open as i32, // Map chmod to Open until we add Chmod to protobuf
         _ => return Err("Unknown event type".into()),
     };
 

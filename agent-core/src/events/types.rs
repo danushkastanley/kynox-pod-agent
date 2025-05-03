@@ -24,6 +24,7 @@ pub union EventData {
     pub bpf_prog_info: BpfProgInfo,
     pub seccomp_info: SeccompInfo,
     pub sock_info: SockInfo,
+    pub chmod_info: ChmodInfo,
 }
 
 #[repr(C)]
@@ -103,4 +104,11 @@ pub struct SockInfo {
     pub sock_fd: u32,
     pub addr: u32,
     pub port: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ChmodInfo {
+    pub path: [i8; FILENAME_LEN],
+    pub mode: u32,
 }
