@@ -28,7 +28,7 @@ spec:
         - name: CONTROLLER_ENDPOINT
           value: "rasp-controller.default.svc:50051"  # Removed http:// prefix for gRPC
         - name: RUST_LOG
-          value: "debug"  # Added to get more detailed logs
+          value: "info"  # Changed from debug to reduce noise
         - name: DEBUG
           value: "info"  # Set to "debug" for verbose logging
         - name: NODE_NAME
@@ -43,6 +43,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: CONTAINER_ID  # Add container ID from status
+          valueFrom:
+            fieldRef:
+              fieldPath: status.containerID
         securityContext:
           privileged: true              # Needed for eBPF kernel access
           capabilities:
