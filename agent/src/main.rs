@@ -71,7 +71,7 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
         info!("Attempting to connect to controller at {}", endpoint);
         
         let uri = format!("http://{}", endpoint);
-        match connect_and_run(&uri).await {
+        match connect_and_run(uri).await {
             Ok(_) => {
                 warn!("Connection closed, attempting to reconnect in {} ms...", RECONNECT_DELAY_MS);
                 tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
@@ -85,13 +85,27 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
     }
 }
 
-async fn connect_and_run(uri: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let channel = Endpoint::from_shared(uri.to_string())?
+async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let endpoint = match Endpoint::from_shared(uri.clone()) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            error!("Failed to create endpoint: {}", e);
+            return Err(Box::new(e));
+        }
+    };
+
+    let channel = match endpoint
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .tcp_nodelay(true)
         .timeout(Duration::from_secs(10))
         .connect()
-        .await?;
+        .await {
+        Ok(channel) => channel,
+        Err(e) => {
+            error!("Failed to connect to endpoint: {}", e);
+            return Err(Box::new(e));
+        }
+    };
 
     info!("Channel established to controller");
     let mut client = TelemetryServiceClient::new(channel.clone());
@@ -177,9 +191,49 @@ async fn connect_and_run(uri: &str) -> Result<(), Box<dyn Error + Send + Sync>> 
                                 Err(e) => {
                                     error!("Failed to send event (attempt {}/{}): {}", attempt, MAX_RETRIES, e);
                                     if attempt == MAX_RETRIES {
+                                        // If we've exhausted retries, trigger reconnection
+                                        error!("Max retries reached, triggering reconnection");
                                         return Err(Box::new(e));
                                     }
-                                    tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+                                    // Use exponential backoff for retries
+                                    let delay = RECONNECT_DELAY_MS * (1 << (attempt - 1));
+                                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                                    
+                                    // Try to reconnect if the channel is closed
+                                    if e.to_string().contains("transport is closing") || 
+                                       e.to_string().contains("channel closed") {
+                                        match conn_manager.connect().await {
+                                            Ok(true) => {
+                                                info!("Successfully reconnected to controller");
+                                                // Get a new client with the new connection
+                                                match Endpoint::from_shared(uri.clone()) {
+                                                    Ok(endpoint) => {
+                                                        match endpoint.connect().await {
+                                                            Ok(new_channel) => {
+                                                                client = TelemetryServiceClient::new(new_channel);
+                                                            }
+                                                            Err(e) => {
+                                                                error!("Failed to connect to endpoint: {}", e);
+                                                                continue;
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Failed to create endpoint: {}", e);
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            Ok(false) => {
+                                                error!("Failed to reconnect to controller");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                error!("Error reconnecting to controller: {}", e);
+                                                continue;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
