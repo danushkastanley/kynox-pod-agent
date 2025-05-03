@@ -11,7 +11,7 @@ use crate::constants::{
     EVENT_TYPE_ACCEPT, EVENT_TYPE_BIND, EVENT_TYPE_BPF_PROG, EVENT_TYPE_CAPSET,
     EVENT_TYPE_CONNECT, EVENT_TYPE_EXEC, EVENT_TYPE_FORK, EVENT_TYPE_MOUNT, EVENT_TYPE_OPEN,
     EVENT_TYPE_PTRACE, EVENT_TYPE_SECCOMP, EVENT_TYPE_SETGID, EVENT_TYPE_SETUID,
-    EVENT_TYPE_SOCKET, EVENT_TYPE_UMOUNT, SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT,
+    EVENT_TYPE_SOCKET, EVENT_TYPE_UMOUNT, EVENT_TYPE_CHMOD, SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT,
     SECCOMP_PRCTL, SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT, SECCOMP_SYSCALL,
     PR_GET_SECCOMP, PR_SET_SECCOMP,
 };
@@ -102,8 +102,8 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
         timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         ptrace_request: None,
         ptrace_target_pid: None,
-        uid: None, // Initialize as None, populate below if applicable
-        gid: None, // Initialize as None, populate below if applicable
+        uid: None,
+        gid: None,
         mount_source: None,
         mount_target: None,
         mount_fstype: None,
@@ -126,6 +126,8 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
         socket_fd: None,
         socket_addr: None,
         socket_port: None,
+        chmod_path: None,
+        chmod_mode: None,
     };
 
     match raw.event_type {
@@ -249,6 +251,12 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
                     event.socket_port = Some(info.port);
                 }
             }
+        }
+        EVENT_TYPE_CHMOD => {
+            // SAFETY: Assumes event_type guarantees the correct union field is active.
+            let info = unsafe { raw.data.chmod_info };
+            event.chmod_path = Some(cstr_to_string(&info.path));
+            event.chmod_mode = Some(info.mode);
         }
         _ => {
             warn!("Received unknown event type in parse_bpf_event: {}", raw.event_type);
