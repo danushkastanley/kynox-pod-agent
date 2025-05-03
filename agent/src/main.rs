@@ -1,17 +1,16 @@
 use std::env;
 use std::error::Error;
 use std::time::Duration;
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::ReceiverStream;
-use prost_types::Timestamp;
+use std::sync::{Arc};
+use tokio::sync::{mpsc, Mutex};
 use tonic::Request;
 use tonic::transport::Endpoint;
 use log::{error, info, debug, warn};
 use env_logger::{Builder, Env};
-use futures::stream;
 use std::io::Write;
+use async_stream::stream;
+use prost_types::Timestamp;
+use tokio_stream::StreamExt;
 
 mod connection;
 use connection::ConnectionManager;
@@ -23,6 +22,8 @@ pub mod telemetry {
 }
 
 use telemetry::{SecurityEvent, telemetry_service_client::TelemetryServiceClient};
+
+type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 // Event types
 const EVENT_TYPE_EXEC: u32 = 0;
@@ -65,7 +66,7 @@ impl AgentConfig {
     }
 }
 
-async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn run_event_sender(endpoint: String) -> Result<(), BoxError> {
     loop {
         let endpoint = endpoint.clone();
         info!("Attempting to connect to controller at {}", endpoint);
@@ -85,7 +86,7 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
     }
 }
 
-async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn connect_and_run(uri: String) -> Result<(), BoxError> {
     let endpoint = match Endpoint::from_shared(uri.clone()) {
         Ok(endpoint) => endpoint,
         Err(e) => {
@@ -161,78 +162,57 @@ async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>
             });
 
             // Start event processing
-            let mut stream = ReceiverStream::new(event_rx);
+            let mut client = client.clone();
+            let conn_manager = Arc::new(Mutex::new(conn_manager));
+            let conn_manager_clone = Arc::clone(&conn_manager);
+            
+            let events_stream = stream! {
+                let mut rx = tokio_stream::wrappers::ReceiverStream::new(event_rx);
+                while let Some(event) = rx.next().await {
+                    let is_connected = conn_manager_clone.lock().await.is_connected();
+                    if !is_connected {
+                        error!("Lost connection to controller");
+                        break;
+                    }
 
-            while let Some(event) = stream.next().await {
-                if !conn_manager.is_connected() {
-                    error!("Lost connection to controller");
-                    break;
+                    let conn_guard = conn_manager_clone.lock().await;
+                    match convert_eventoutput_to_securityevent(&event, &*conn_guard) {
+                        Ok(security_event) => {
+                            yield security_event;
+                        }
+                        Err(e) => {
+                            error!("Failed to convert event: {}", e);
+                        }
+                    }
                 }
+            };
 
-                match convert_eventoutput_to_securityevent(&event, &conn_manager) {
-                    Ok(security_event) => {
-                        // Try to send event with retries
-                        for attempt in 1..=MAX_RETRIES {
-                            // Create a new request for each attempt
-                            let events = vec![security_event.clone()];
-                            let events_request = Request::new(stream::iter(events));
-                            
-                            match client.stream_events(events_request).await {
-                                Ok(_) => {
-                                    debug!("Successfully sent event");
-                                    break;
-                                }
-                                Err(e) => {
-                                    error!("Failed to send event (attempt {}/{}): {}", attempt, MAX_RETRIES, e);
-                                    if attempt == MAX_RETRIES {
-                                        // If we've exhausted retries, trigger reconnection
-                                        error!("Max retries reached, triggering reconnection");
-                                        return Err(Box::new(e));
-                                    }
-                                    // Use exponential backoff for retries
-                                    let delay = RECONNECT_DELAY_MS * (1 << (attempt - 1));
-                                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                                    
-                                    // Try to reconnect if the channel is closed
-                                    if e.to_string().contains("transport is closing") || 
-                                       e.to_string().contains("channel closed") {
-                                        match conn_manager.connect().await {
-                                            Ok(true) => {
-                                                info!("Successfully reconnected to controller");
-                                                // Get a new client with the new connection
-                                                match Endpoint::from_shared(uri.clone()) {
-                                                    Ok(endpoint) => {
-                                                        match endpoint.connect().await {
-                                                            Ok(new_channel) => {
-                                                                client = TelemetryServiceClient::new(new_channel);
-                                                            }
-                                                            Err(e) => {
-                                                                error!("Failed to connect to endpoint: {}", e);
-                                                                continue;
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        error!("Failed to create endpoint: {}", e);
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-                                            Ok(false) => {
-                                                error!("Failed to reconnect to controller");
-                                                continue;
-                                            }
-                                            Err(e) => {
-                                                error!("Error reconnecting to controller: {}", e);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
+            // Create a single stream request for all events
+            let stream_request = Request::new(events_stream);
+            match client.stream_events(stream_request).await {
+                Ok(_) => {
+                    debug!("Event stream completed successfully");
+                }
+                Err(e) => {
+                    error!("Event stream failed: {}", e);
+                    if e.to_string().contains("transport is closing") || 
+                       e.to_string().contains("channel closed") {
+                        // Try to reconnect
+                        let mut conn_guard = conn_manager.lock().await;
+                        match conn_guard.connect().await {
+                            Ok(true) => {
+                                info!("Successfully reconnected to controller");
+                            }
+                            Ok(false) => {
+                                error!("Failed to reconnect to controller");
+                                return Err(Box::new(e));
+                            }
+                            Err(e) => {
+                                error!("Error reconnecting to controller: {}", e);
+                                return Err(Box::new(e));
                             }
                         }
                     }
-                    Err(e) => error!("Failed to convert event: {}", e),
                 }
             }
 
@@ -253,7 +233,7 @@ async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), BoxError> {
     // Initialize logging based on DEBUG environment variable
     let env = Env::default()
         .filter_or("DEBUG", "info") // Use "info" level if DEBUG not set
@@ -276,10 +256,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting RASP Pod Agent...");
 
-    let config = Arc::new(StdMutex::new(AgentConfig::load()));
-    info!("Configuration loaded: {:?}", config.lock().unwrap());
+    let config = Arc::new(Mutex::new(AgentConfig::load()));
+    info!("Configuration loaded: {:?}", config.lock().await);
     
-    let endpoint = config.lock().unwrap().controller_endpoint.clone();
+    let endpoint = config.lock().await.controller_endpoint.clone();
     info!("Attempting to connect to controller at: {}", endpoint);
     
     // Run the event sender
@@ -291,7 +271,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 // Helper function to convert EventOutput to SecurityEvent
-fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &ConnectionManager) -> Result<SecurityEvent, Box<dyn Error>> {
+fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &ConnectionManager) -> Result<SecurityEvent, BoxError> {
     debug!("Converting EventOutput (PID: {}) to SecurityEvent", event.pid);
 
     let event_type_proto = match event.event_type {
