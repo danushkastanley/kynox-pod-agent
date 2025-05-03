@@ -301,12 +301,16 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         EVENT_TYPE_SOCKET => telemetry::EventType::Socket as i32,
         EVENT_TYPE_BIND => telemetry::EventType::Bind as i32,
         EVENT_TYPE_ACCEPT => telemetry::EventType::Accept as i32,
-        EVENT_TYPE_CHMOD => telemetry::EventType::Open as i32, // Map chmod to Open until we add Chmod to protobuf
+        EVENT_TYPE_CHMOD => telemetry::EventType::Chmod as i32,
         _ => return Err("Unknown event type".into()),
     };
 
     let mut container_context = std::collections::HashMap::new();
     container_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
+    container_context.insert("node_name".to_string(), conn_manager.get_node_name().to_string());
+    container_context.insert("pod_name".to_string(), conn_manager.get_pod_name().to_string());
+    container_context.insert("namespace".to_string(), env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string()));
+    container_context.insert("container_id".to_string(), env::var("CONTAINER_ID").unwrap_or_else(|_| "unknown".to_string()));
 
     Ok(SecurityEvent {
         timestamp: Some(Timestamp {
@@ -342,6 +346,11 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         gid: event.gid.unwrap_or(0) as i32,
         ptrace_request: event.ptrace_request.map(|r| r as i64).unwrap_or(-1),
         ptrace_target_pid: event.ptrace_target_pid.map(|p| p as i32).unwrap_or(-1),
+        mode: if event.event_type == EVENT_TYPE_CHMOD {
+            event.chmod_mode.unwrap_or(0) as i32
+        } else {
+            0
+        },
         container_context,
     })
 }
