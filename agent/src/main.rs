@@ -124,6 +124,14 @@ async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>
             // Create channels for event communication
             let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
             
+            // Start the heartbeat task in a separate task
+            let mut heartbeat_manager = conn_manager.clone();
+            tokio::spawn(async move {
+                if let Err(e) = heartbeat_manager.start_heartbeat().await {
+                    error!("Heartbeat task failed: {}", e);
+                }
+            });
+            
             // Start the syscall monitor
             let mut monitor = SyscallMonitor::new()?;
             monitor.attach()?;
@@ -148,20 +156,6 @@ async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>
                     if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
                         error!("Event collection error: {}", e);
                         break;
-                    }
-                }
-            });
-
-            // Start heartbeat in separate task
-            let mut conn_manager_heartbeat = conn_manager.clone();
-            let heartbeat_handle = tokio::spawn(async move {
-                loop {
-                    match conn_manager_heartbeat.start_heartbeat().await {
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!("Heartbeat error: {}", e);
-                            break;
-                        }
                     }
                 }
             });
@@ -243,7 +237,6 @@ async fn connect_and_run(uri: String) -> Result<(), Box<dyn Error + Send + Sync>
             }
 
             // Wait for tasks to complete
-            heartbeat_handle.abort();
             collection_handle.abort();
             
             Ok(())
