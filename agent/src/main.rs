@@ -1,12 +1,12 @@
 use std::env;
 use std::error::Error;
 use std::time::{Duration, Instant};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
-use tonic::{transport::Channel, Request};
+use tonic::{transport::Channel, Request, Code};
 use log::{error, info, debug};
 use env_logger::{Builder, Env};
 use futures::stream;
@@ -100,112 +100,99 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
                             }
                         });
 
-                        // Only start collecting events if we're connected
+                        // Wait for a successful heartbeat before starting event collection
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        
+                        // Only start collecting events if we're still connected
                         if conn_manager.is_connected() {
                             let (tx, rx) = mpsc::channel::<SecurityEvent>(EVENT_CHANNEL_SIZE);
-                            let tx = Arc::new(Mutex::new(tx));
+                            let tx = Arc::new(StdMutex::new(tx));
                             let tx_clone = tx.clone();
                             
-                            let _bpf_handle = tokio::spawn(async move {
-                                let mut monitor = SyscallMonitor::new().expect("Failed to create syscall monitor");
-                                monitor.attach().expect("Failed to attach BPF programs");
-                                info!("BPF programs attached successfully");
-
-                                let tx = tx_clone.clone();
-                                // Set up ring buffer callback
-                                monitor.setup_ring_buffer(move |data| {
-                                    if let Some(event) = parse_bpf_event(data) {
-                                        if let Ok(security_event) = convert_eventoutput_to_securityevent(&event, &conn_manager) {
-                                            let tx = tx.clone();
-                                            tokio::spawn(async move {
-                                                if let Err(e) = tx.lock().await.send(security_event).await {
-                                                    error!("Failed to send event: {}", e);
-                                                }
-                                            });
+                            // Start BPF event collection
+                            let mut monitor = SyscallMonitor::new()?;
+                            monitor.attach()?;
+                            
+                            let tx_clone = tx_clone.clone();
+                            let conn_manager = conn_manager.clone();
+                            monitor.setup_ring_buffer(move |data| {
+                                if let Some(event) = parse_bpf_event(data) {
+                                    if let Ok(security_event) = convert_eventoutput_to_securityevent(&event, &conn_manager) {
+                                        if let Ok(tx) = tx_clone.lock() {
+                                            if let Err(e) = tx.try_send(security_event) {
+                                                error!("Failed to send event to channel: {}", e);
+                                            }
                                         }
                                     }
-                                    0
-                                }).expect("Failed to setup ring buffer");
-
-                                info!("Ring buffer setup complete, starting polling...");
-                                
-                                loop {
-                                    if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
-                                        error!("Error polling events: {}", e);
-                                    }
                                 }
-                            });
+                                0
+                            })?;
 
-                            // Create a stream from the receiver
-                            let mut stream = ReceiverStream::new(rx);
+                            // Start polling in a loop
+                            loop {
+                                if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
+                                    error!("Error polling events: {}", e);
+                                    break;
+                                }
+                            }
+
+                            // Start event batch processing
                             let mut events = Vec::with_capacity(EVENT_BATCH_SIZE);
                             let mut last_send = Instant::now();
+                            let mut rx = ReceiverStream::new(rx);
 
-                            while let Some(event) = stream.next().await {
+                            while let Some(event) = rx.next().await {
                                 events.push(event);
                                 let should_send = events.len() >= EVENT_BATCH_SIZE || 
-                                                last_send.elapsed().as_millis() as u64 >= EVENT_BATCH_TIMEOUT_MS;
-                                
+                                    last_send.elapsed() >= Duration::from_millis(EVENT_BATCH_TIMEOUT_MS);
+
                                 if should_send && !events.is_empty() {
                                     let batch = std::mem::take(&mut events);
                                     let stream = stream::iter(batch);
-                                    if let Err(e) = client.stream_events(Request::new(stream)).await {
-                                        error!("Failed to send event batch: {}", e);
+                                    match client.stream_events(Request::new(stream)).await {
+                                        Ok(_) => {
+                                            debug!("Successfully sent event batch");
+                                            last_send = Instant::now();
+                                            reconnect_delay = RECONNECT_DELAY_MS; // Reset delay on success
+                                        }
+                                        Err(e) => {
+                                            if e.code() == Code::Unknown && e.message() == "EOF" {
+                                                // This is normal - server closed the stream after processing
+                                                debug!("Event batch processed by server");
+                                                last_send = Instant::now();
+                                                reconnect_delay = RECONNECT_DELAY_MS; // Reset delay on success
+                                            } else {
+                                                error!("Failed to send event batch: {}", e);
+                                                if e.code() == Code::FailedPrecondition {
+                                                    // Connection lost, break to trigger reconnect
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
-                                    last_send = Instant::now();
                                 }
                             }
 
-                            // Send any remaining events
-                            if !events.is_empty() {
-                                let stream = stream::iter(events);
-                                if let Err(e) = client.stream_events(Request::new(stream)).await {
-                                    error!("Failed to send remaining events: {}", e);
-                                }
-                            }
-                        } else {
-                            error!("Failed to establish initial connection");
+                            // Clean up handles
+                            heartbeat_handle.abort();
                         }
-
-                        // Wait for either heartbeat to fail or events to complete
-                        tokio::select! {
-                            _ = heartbeat_handle => {
-                                error!("Heartbeat task ended, triggering reconnection");
-                            }
-                            _ = async {
-                                // Add other error conditions here
-                            } => {}
-                        }
-
-                        // Reset reconnect delay on successful connection
-                        reconnect_delay = RECONNECT_DELAY_MS;
                     }
                     Ok(false) => {
-                        error!("Connection rejected by controller");
+                        error!("Failed to connect to controller - retrying in {} ms", reconnect_delay);
                     }
                     Err(e) => {
-                        error!("Failed to connect: {}", e);
+                        error!("Connection error: {} - retrying in {} ms", e, reconnect_delay);
                     }
                 }
             }
             Err(e) => {
-                error!("Failed to establish channel: {}", e);
+                error!("Channel error: {} - retrying in {} ms", e, reconnect_delay);
             }
         }
-        
-        info!("Waiting {} ms before reconnection attempt...", reconnect_delay);
-        tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
-        reconnect_delay = std::cmp::min(reconnect_delay * 2, 30000);
 
-        // Try DNS resolution
-        if let Ok(addrs) = tokio::net::lookup_host("rasp-controller.default.svc:50051").await {
-            info!("DNS lookup results for controller:");
-            for addr in addrs {
-                info!("  Found address: {}", addr);
-            }
-        } else {
-            error!("Failed to resolve controller DNS name");
-        }
+        tokio::time::sleep(Duration::from_millis(reconnect_delay)).await;
+        // Increase reconnect delay up to 30 seconds
+        reconnect_delay = std::cmp::min(reconnect_delay * 2, 30000);
     }
 }
 
@@ -233,10 +220,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting RASP Pod Agent...");
 
-    let config = Arc::new(Mutex::new(AgentConfig::load()));
-    info!("Configuration loaded: {:?}", config.lock().await);
+    let config = Arc::new(StdMutex::new(AgentConfig::load()));
+    info!("Configuration loaded: {:?}", config.lock().unwrap());
     
-    let endpoint = config.lock().await.controller_endpoint.clone();
+    let endpoint = config.lock().unwrap().controller_endpoint.clone();
     info!("Attempting to connect to controller at: {}", endpoint);
     
     // Run the event sender
