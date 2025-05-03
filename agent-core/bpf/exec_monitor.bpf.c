@@ -62,6 +62,7 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_SOCKET 12
 #define EVENT_TYPE_BIND 13
 #define EVENT_TYPE_ACCEPT 14
+#define EVENT_TYPE_CHMOD 15
 
 // Network-related constants
 #define AF_INET6 10
@@ -122,19 +123,23 @@ struct exec_monitor_event {
             char license[64];
         } bpf_prog_info;
         struct {
-            __u32 operation;     // prctl or seccomp syscall
-            __u32 option;        // Option/command being used
-            __u32 mode;          // Seccomp mode being set
-            __u32 flags;         // Additional flags
+            __u32 operation;
+            __u32 option;
+            __u32 mode;
+            __u32 flags;
         } seccomp_info;
         struct {
-            __s32 domain;     // AF_INET, AF_INET6, etc.
-            __s32 type;       // SOCK_STREAM, SOCK_DGRAM, etc.
-            __s32 protocol;   // IPPROTO_TCP, IPPROTO_UDP, etc.
-            __u32 sock_fd;    // Socket file descriptor
-            __u32 addr;       // IP address for bind/accept
-            __u16 port;       // Port number for bind/accept
+            __s32 domain;
+            __s32 type;
+            __s32 protocol;
+            __u32 sock_fd;
+            __u32 addr;
+            __u16 port;
         } sock_info;
+        struct {
+            char path[FILENAME_LEN];
+            __u32 mode;
+        } chmod_info;
     };
 };
 
@@ -593,4 +598,86 @@ SEC("tp/syscalls/sys_enter_accept4")
 int handle_accept4(struct trace_event_raw_sys_enter *ctx)
 {
     return handle_accept(ctx);
+}
+
+// Handler for chmod syscall
+SEC("tp/syscalls/sys_enter_chmod")
+int handle_chmod(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_CHMOD);
+    
+    // Read the target path
+    if (bpf_probe_read_user_str(e->chmod_info.path, sizeof(e->chmod_info.path), (const void *)ctx->args[0]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
+
+    // Read the mode
+    e->chmod_info.mode = (__u32)ctx->args[1];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for fchmod syscall
+SEC("tp/syscalls/sys_enter_fchmod")
+int handle_fchmod(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+    int fd = (int)ctx->args[0];
+    char path[FILENAME_LEN];
+
+    // Try to get path from fd
+    if (bpf_probe_read_kernel_str(path, sizeof(path), (void *)fd) < 0) {
+        return 0;
+    }
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_CHMOD);
+    
+    // Copy the path
+    bpf_probe_read_kernel_str(e->chmod_info.path, sizeof(e->chmod_info.path), path);
+    
+    // Read the mode
+    e->chmod_info.mode = (__u32)ctx->args[1];
+
+    submit_event(e);
+    return 0;
+}
+
+// Handler for fchmodat syscall
+SEC("tp/syscalls/sys_enter_fchmodat")
+int handle_fchmodat(struct trace_event_raw_sys_enter *ctx)
+{
+    struct exec_monitor_event *e;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    init_event(e, EVENT_TYPE_CHMOD);
+    
+    // Read the target path
+    if (bpf_probe_read_user_str(e->chmod_info.path, sizeof(e->chmod_info.path), (const void *)ctx->args[1]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
+
+    // Read the mode
+    e->chmod_info.mode = (__u32)ctx->args[2];
+
+    submit_event(e);
+    return 0;
 }
