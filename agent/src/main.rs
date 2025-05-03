@@ -8,7 +8,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use prost_types::Timestamp;
 use tonic::{transport::Channel, Request};
 use log::{error, info, debug};
+use env_logger::{Builder, Env};
 use futures::stream;
+use std::io::Write;
 
 mod connection;
 use connection::ConnectionManager;
@@ -209,16 +211,24 @@ async fn run_event_sender(endpoint: String) -> Result<(), Box<dyn Error + Send +
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize logging with custom filter
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        // Only show logs from our crate and agent_core
-        .filter_module("agent", log::LevelFilter::Debug)
-        .filter_module("agent_core", log::LevelFilter::Debug)
-        // Filter out noisy tonic logs
-        .filter_module("tonic", log::LevelFilter::Warn)
-        .filter_module("h2", log::LevelFilter::Warn)
-        .filter_module("tower", log::LevelFilter::Warn)
+    // Initialize logging based on DEBUG environment variable
+    let env = Env::default()
+        .filter_or("DEBUG", "info") // Use "info" level if DEBUG not set
+        .write_style_or("LOG_STYLE", "always");
+
+    Builder::from_env(env)
+        .format_timestamp_millis()
+        .format(|buf, record| {
+            use chrono::Local;
+            let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            writeln!(
+                buf,
+                "[{}] {} - {}",
+                timestamp,
+                record.level(),
+                record.args()
+            )
+        })
         .init();
 
     info!("Starting RASP Pod Agent...");

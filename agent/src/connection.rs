@@ -75,7 +75,7 @@ impl ConnectionManager {
         let agent_id = Arc::new(self.agent_id.clone());
         let node_name = Arc::new(self.node_name.clone());
         let pod_name = Arc::new(self.pod_name.clone());
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let is_healthy = self.is_healthy.clone();
 
         let connect_operation = move || {
@@ -101,11 +101,11 @@ impl ConnectionManager {
                             let session_id = response.session_id;
                             is_healthy.store(true, Ordering::SeqCst);
                             
-                            info!("✅ Connection established successfully:");
-                            info!("   Agent ID: {}", *agent_id);
-                            info!("   Session ID: {}", session_id);
-                            info!("   Node: {}", *node_name);
-                            info!("   Pod: {}", *pod_name);
+                            info!("🔗 Successfully connected to controller (session: {})", session_id);
+                            debug!("Connection details:");
+                            debug!("  Agent ID: {}", *agent_id);
+                            debug!("  Node: {}", *node_name);
+                            debug!("  Pod: {}", *pod_name);
                             
                             Ok((true, Some(session_id)))
                         } else {
@@ -160,7 +160,7 @@ impl ConnectionManager {
                         let status = response.into_inner();
                         match status.status {
                             0 => { // CONNECTED
-                                debug!("💗 Heartbeat successful");
+                                debug!("💓 Heartbeat acknowledged");
                                 self.is_healthy.store(true, Ordering::SeqCst);
                             }
                             2 => { // ERROR
