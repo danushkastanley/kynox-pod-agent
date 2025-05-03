@@ -41,7 +41,8 @@ const EVENT_TYPE_SECCOMP: u32 = 11;
 const EVENT_TYPE_SOCKET: u32 = 12;
 const EVENT_TYPE_BIND: u32 = 13;
 const EVENT_TYPE_ACCEPT: u32 = 14;
-const EVENT_TYPE_CHMOD: u32 = 15;
+const EVENT_TYPE_CHMOD: u32 = 23;
+const EVENT_TYPE_UNKNOWN: u32 = 15;
 
 // Original buffer sizes and timeouts
 const EVENT_CHANNEL_SIZE: usize = 50000;  
@@ -321,7 +322,7 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         pid: event.pid as i32,
         ppid: event.parent_pid.unwrap_or(0) as i32,
         command: event.comm.clone(),
-        file_path: event.filename.as_ref().map_or_else(String::new, |s| s.clone()),
+        file_path: event.filename.clone().unwrap_or_default(),
         destination_ip: if event.event_type == EVENT_TYPE_CONNECT {
             event.daddr.as_ref().map_or_else(String::new, |s| s.clone())
         } else {
