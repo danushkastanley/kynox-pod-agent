@@ -322,7 +322,11 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         pid: event.pid as i32,
         ppid: event.parent_pid.unwrap_or(0) as i32,
         command: event.comm.clone(),
-        file_path: event.filename.clone().unwrap_or_default(),
+        file_path: if event.event_type == EVENT_TYPE_CHMOD {
+            event.chmod_path.clone().unwrap_or_default()
+        } else {
+            event.filename.clone().unwrap_or_default()
+        },
         destination_ip: if event.event_type == EVENT_TYPE_CONNECT {
             event.daddr.as_ref().map_or_else(String::new, |s| s.clone())
         } else {
