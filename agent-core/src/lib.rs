@@ -38,6 +38,10 @@ pub mod constants {
     pub const EVENT_TYPE_BIND: u32 = 13;
     pub const EVENT_TYPE_ACCEPT: u32 = 14;
 
+    // Seccomp Operation Constants (from BPF struct context)
+    pub const SECCOMP_PRCTL: u32 = 1; // Placeholder value, adjust if known from BPF C code
+    pub const SECCOMP_SYSCALL: u32 = 2; // Placeholder value, adjust if known from BPF C code
+
     // Seccomp-related constants
     pub const PR_SET_SECCOMP: u32 = 22;
     pub const PR_GET_SECCOMP: u32 = 21;

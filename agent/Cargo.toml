@@ -2,6 +2,9 @@
 name = "agent"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 agent-core = { path = "../agent-core" }
@@ -13,6 +16,16 @@ libbpf-rs = "0.20"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 libbpf-sys = "1.5.0+v1.5.0"
+tokio = { version = "1.0", features = ["full"] }
+tonic = "0.11"
+prost = "0.12"
+prost-types = "0.12"
+tokio-stream = "0.1"
+futures = "0.3"
+uuid = { version = "1.4", features = ["v4"] }
+backoff = { version = "0.4", features = ["tokio"] }
+chrono = "0.4.41"
 
 [build-dependencies]
 libbpf-cargo = "0.21"
+tonic-build = "0.11"
