@@ -1,7 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::time::Duration;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::Request;
 use tonic::transport::Endpoint;
@@ -109,7 +109,7 @@ async fn connect_and_run(uri: String) -> Result<(), BoxError> {
     };
 
     info!("Channel established to controller");
-    let mut client = TelemetryServiceClient::new(channel.clone());
+    let client = TelemetryServiceClient::new(channel.clone());
     
     // Create and connect the connection manager
     let mut conn_manager = ConnectionManager::new(
@@ -169,13 +169,37 @@ async fn connect_and_run(uri: String) -> Result<(), BoxError> {
             let events_stream = stream! {
                 let mut rx = tokio_stream::wrappers::ReceiverStream::new(event_rx);
                 while let Some(event) = rx.next().await {
-                    let is_connected = conn_manager_clone.lock().await.is_connected();
-                    if !is_connected {
-                        error!("Lost connection to controller");
-                        break;
+                    let conn_guard = conn_manager_clone.lock().await;
+                    if !conn_guard.is_connected() {
+                        error!("Lost connection to controller, attempting reconnect...");
+                        drop(conn_guard); // Release lock before reconnect
+
+                        // Try to reconnect
+                        let mut retry_count = 0;
+                        let mut reconnected = false;
+                        while retry_count < MAX_RETRIES {
+                            let mut conn_guard = conn_manager_clone.lock().await;
+                            match conn_guard.connect().await {
+                                Ok(true) => {
+                                    info!("Successfully reconnected to controller");
+                                    reconnected = true;
+                                    break;
+                                }
+                                _ => {
+                                    retry_count += 1;
+                                    warn!("Reconnect attempt {} failed, retrying in {} ms...", retry_count, RECONNECT_DELAY_MS);
+                                    drop(conn_guard); // Release lock before sleep
+                                    tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+                                }
+                            }
+                        }
+                        if !reconnected {
+                            error!("Failed to reconnect after {} attempts", MAX_RETRIES);
+                            break;
+                        }
+                        continue; // Skip this event and try next one
                     }
 
-                    let conn_guard = conn_manager_clone.lock().await;
                     match convert_eventoutput_to_securityevent(&event, &*conn_guard) {
                         Ok(security_event) => {
                             yield security_event;
@@ -197,21 +221,8 @@ async fn connect_and_run(uri: String) -> Result<(), BoxError> {
                     error!("Event stream failed: {}", e);
                     if e.to_string().contains("transport is closing") || 
                        e.to_string().contains("channel closed") {
-                        // Try to reconnect
-                        let mut conn_guard = conn_manager.lock().await;
-                        match conn_guard.connect().await {
-                            Ok(true) => {
-                                info!("Successfully reconnected to controller");
-                            }
-                            Ok(false) => {
-                                error!("Failed to reconnect to controller");
-                                return Err(Box::new(e));
-                            }
-                            Err(e) => {
-                                error!("Error reconnecting to controller: {}", e);
-                                return Err(Box::new(e));
-                            }
-                        }
+                        // Let the outer loop handle reconnection
+                        return Err(Box::new(e));
                     }
                 }
             }
@@ -290,7 +301,7 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
         EVENT_TYPE_SOCKET => telemetry::EventType::Socket as i32,
         EVENT_TYPE_BIND => telemetry::EventType::Bind as i32,
         EVENT_TYPE_ACCEPT => telemetry::EventType::Accept as i32,
-        EVENT_TYPE_CHMOD => telemetry::EventType::Open as i32, // Map chmod to Open for now
+        EVENT_TYPE_CHMOD => telemetry::EventType::Open as i32, // Map chmod to Open until we add Chmod to protobuf
         _ => return Err("Unknown event type".into()),
     };
 
