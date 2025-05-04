@@ -219,7 +219,10 @@ int handle_execve(struct trace_event_raw_sys_enter *ctx) {
     if (!e) return 0;
 
     init_event(e, EVENT_TYPE_EXEC);
-    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]);
+    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
 
     submit_event(e);
     return 0;
@@ -233,7 +236,10 @@ int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
     if (!e) return 0;
 
     init_event(e, EVENT_TYPE_EXEC); // Treat execveat same as execve for now
-    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]);
+    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
 
     submit_event(e);
     return 0;
@@ -247,7 +253,10 @@ int handle_open(struct trace_event_raw_sys_enter *ctx) {
     if (!e) return 0;
 
     init_event(e, EVENT_TYPE_OPEN);
-    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]);
+    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
 
     submit_event(e);
     return 0;
@@ -261,7 +270,10 @@ int handle_openat(struct trace_event_raw_sys_enter *ctx) {
     if (!e) return 0;
 
     init_event(e, EVENT_TYPE_OPEN); // Treat openat same as open
-    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]);
+    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
 
     submit_event(e);
     return 0;
@@ -397,9 +409,18 @@ int handle_mount(struct trace_event_raw_sys_enter *ctx) {
     init_event(e, EVENT_TYPE_MOUNT);
 
     // mount arguments: char *source, char *target, char *filesystemtype, unsigned long mountflags, void *data
-    bpf_probe_read_user_str(&e->mount_info.source, sizeof(e->mount_info.source), (void *)ctx->args[0]);
-    bpf_probe_read_user_str(&e->mount_info.target, sizeof(e->mount_info.target), (void *)ctx->args[1]);
-    bpf_probe_read_user_str(&e->mount_info.fstype, sizeof(e->mount_info.fstype), (void *)ctx->args[2]);
+    if (bpf_probe_read_user_str(&e->mount_info.source, sizeof(e->mount_info.source), (void *)ctx->args[0]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
+    if (bpf_probe_read_user_str(&e->mount_info.target, sizeof(e->mount_info.target), (void *)ctx->args[1]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
+    if (bpf_probe_read_user_str(&e->mount_info.fstype, sizeof(e->mount_info.fstype), (void *)ctx->args[2]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
     e->mount_info.flags = (unsigned long)ctx->args[3];
 
     submit_event(e);
@@ -418,7 +439,10 @@ int handle_umount2(struct trace_event_raw_sys_enter *ctx) {
     init_event(e, EVENT_TYPE_UMOUNT);
 
     // umount2 arguments: const char *target, int flags
-    bpf_probe_read_user_str(&e->umount_info.target, sizeof(e->umount_info.target), (void *)ctx->args[0]);
+    if (bpf_probe_read_user_str(&e->umount_info.target, sizeof(e->umount_info.target), (void *)ctx->args[0]) < 0) {
+        bpf_ringbuf_discard(e, 0);
+        return 0;
+    }
     e->umount_info.flags = (int)ctx->args[1];
 
     submit_event(e);
