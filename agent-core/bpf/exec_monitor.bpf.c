@@ -80,12 +80,16 @@ struct sched_process_fork_args {
 #define SECCOMP_SET_MODE_FILTER 1
 #define SECCOMP_GET_ACTION_AVAIL 2
 
+// Container context
+#define CONTAINER_ID_LEN 64
+
 struct exec_monitor_event {
     __u32 event_type;
     __u32 pid;
     __u32 parent_pid;
     __u32 child_pid;
     char comm[TASK_COMM_LEN];
+    char container_id[CONTAINER_ID_LEN];  // Added container ID field
     union {
         char filename[FILENAME_LEN];
         struct {
@@ -195,11 +199,26 @@ static __always_inline void submit_event(struct exec_monitor_event *e) {
 
 // Helper to initialize common event fields
 static __always_inline void init_event(struct exec_monitor_event *e, __u32 type) {
+    __u64 id = bpf_get_current_pid_tgid();
     e->event_type = type;
-    e->pid = bpf_get_current_pid_tgid() >> 32;
+    e->pid = id >> 32;
     e->parent_pid = 0;  // Will be set by specific handlers if needed
     e->child_pid = 0;   // Will be set by specific handlers if needed
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    // Get container ID from cgroup path
+    unsigned long long cgroup_id = bpf_get_current_cgroup_id();
+    if (cgroup_id != 0) {
+        // Store cgroup ID as hex string in container_id
+        char hex[] = "0123456789abcdef";
+        int i;
+        for (i = 0; i < 16 && i < CONTAINER_ID_LEN - 1; i++) {
+            e->container_id[i] = hex[(cgroup_id >> (60 - i*4)) & 0xf];
+        }
+        e->container_id[i] = '\0';
+    } else {
+        e->container_id[0] = '\0';
+    }
 }
 
 // Handler for execve syscall
