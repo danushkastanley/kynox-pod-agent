@@ -160,4 +160,4 @@ env:
 This project is licensed under the MIT License - see the LICENSE file for details.
 
 ---
-*For detailed technical documentation and API references, please visit the [Wiki](../../wiki).*
+*Built for Linux VM environment.*
