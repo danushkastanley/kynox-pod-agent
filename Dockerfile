@@ -67,9 +67,6 @@ COPY ./agent/src/ ./agent/src/
 COPY ./agent-core/src/ ./agent-core/src/
 COPY ./agent-core/bpf/ ./agent-core/bpf/
 
-# Copy vmlinux.h
-COPY ./vmlinux.h /usr/include/
-
 # Set LIBBPF path and build BPF code
 ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu \
     BPF_CLANG=clang-14 \
@@ -90,9 +87,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary and vmlinux.h
+# Copy binary and vmlinux.h from the project's include directory
 COPY --from=builder /workspace/target/release/agent /agent
-COPY --from=builder /usr/include/vmlinux.h /usr/include/
+COPY --from=builder /workspace/agent-core/bpf/include/vmlinux.h /usr/include/
 
 # Set the entrypoint
 ENTRYPOINT ["/agent"]

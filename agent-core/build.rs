@@ -20,14 +20,29 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BPF_CLANG");
     println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
 
+    // Get include paths from environment variables
+    let libelf_include_dir = env::var("LIBELF_INCLUDE_DIR").unwrap_or_else(|_| "/usr/include".to_string());
+    let libbpf_include_dir = env::var("LIBBPF_INCLUDE_DIR").unwrap_or_else(|_| "/usr/include".to_string());
+
+    // Get BPF compiler and flags
+    let clang = env::var("BPF_CLANG").unwrap_or_else(|_| "clang".to_string());
+    let cflags = env::var("BPF_CFLAGS").unwrap_or_default();
+
     // Create a new builder instance that lives long enough
     let mut builder = SkeletonBuilder::new();
     builder.source(&bpf_src);
 
     // Configure clang if specified
-    if let Ok(clang) = env::var("BPF_CLANG") {
-        builder.clang(&clang);
-    }
+    builder.clang(&clang);
+
+    // Create clang args string
+    let clang_args = format!(
+        "-g -O2 -target bpf -D__TARGET_ARCH_x86 -I{} -I{} -I/usr/include/x86_64-linux-gnu -I/usr/include -I./bpf/include {}",
+        libelf_include_dir, libbpf_include_dir, cflags
+    );
+
+    // Add clang args
+    builder.clang_args(&clang_args);
 
     // Build with proper error handling
     match builder.build_and_generate(&skel) {
