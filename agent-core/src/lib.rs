@@ -20,6 +20,7 @@ pub mod constants {
     pub const TASK_COMM_LEN: usize = 16;
     pub const FILENAME_LEN: usize = 256;
     pub const FS_INFO_LEN: usize = 128;
+    pub const CONTAINER_ID_LEN: usize = 64;
 
     // Event type constants
     pub const EVENT_TYPE_EXEC: u32 = 0;

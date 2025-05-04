@@ -7,6 +7,7 @@ pub struct Event {
     pub parent_pid: u32,
     pub child_pid: u32,
     pub comm: [i8; TASK_COMM_LEN],
+    pub container_id: [i8; CONTAINER_ID_LEN],
     pub data: EventData,
 }
 

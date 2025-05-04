@@ -99,6 +99,7 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
         parent_pid: Some(raw.parent_pid),
         child_pid: Some(raw.child_pid),
         comm: cstr_to_string(&raw.comm),
+        container_id: Some(cstr_to_string(&raw.container_id)),
         filename: None,
         daddr: None,
         dport: None,

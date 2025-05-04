@@ -11,6 +11,7 @@ pub struct EventOutput {
     pub parent_pid: Option<u32>,
     pub child_pid: Option<u32>,
     pub comm: String,
+    pub container_id: Option<String>,
     pub filename: Option<String>,
     pub daddr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
