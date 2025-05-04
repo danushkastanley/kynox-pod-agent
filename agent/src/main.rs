@@ -53,6 +53,9 @@ const RECONNECT_DELAY_MS: u64 = 1000;
 const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500); 
 const MAX_RETRIES: usize = 3;             
 
+mod utils;
+use utils::get_container_context;
+
 #[derive(Debug, Clone)]
 struct AgentConfig {
     controller_endpoint: String,
@@ -307,11 +310,47 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
     };
 
     let mut container_context = std::collections::HashMap::new();
-    container_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
-    container_context.insert("node_name".to_string(), conn_manager.get_node_name().to_string());
-    container_context.insert("pod_name".to_string(), conn_manager.get_pod_name().to_string());
-    container_context.insert("namespace".to_string(), env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string()));
-    container_context.insert("container_id".to_string(), env::var("CONTAINER_ID").unwrap_or_else(|_| "unknown".to_string()));
+    
+    // First try to get container context for the process
+    if let Ok(Some(process_context)) = get_container_context(event.pid as u32) {
+        container_context.extend(process_context);
+    } else {
+        // Fallback to agent's context if process container lookup fails
+        container_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
+        container_context.insert("node_name".to_string(), conn_manager.get_node_name().to_string());
+        container_context.insert("pod_name".to_string(), conn_manager.get_pod_name().to_string());
+        container_context.insert("namespace".to_string(), env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string()));
+        container_context.insert("container_id".to_string(), env::var("CONTAINER_ID").unwrap_or_else(|_| "unknown".to_string()));
+    }
+
+    // For fork events, also try to get parent process container context
+    if event.event_type == EVENT_TYPE_FORK {
+        match event.parent_pid {
+            Some(parent_pid) if parent_pid > 0 => {
+                if let Ok(Some(parent_context)) = get_container_context(parent_pid) {
+                    container_context.insert("parent_container_id".to_string(), 
+                        parent_context.get("container_id").unwrap_or(&"unknown".to_string()).clone());
+                    if let Some(parent_pod) = parent_context.get("pod_name") {
+                        container_context.insert("parent_pod_name".to_string(), parent_pod.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // For ptrace events, get target process container context
+    if event.event_type == EVENT_TYPE_PTRACE {
+        if let Some(target_pid) = event.ptrace_target_pid {
+            if let Ok(Some(target_context)) = get_container_context(target_pid as u32) {
+                container_context.insert("target_container_id".to_string(),
+                    target_context.get("container_id").unwrap_or(&"unknown".to_string()).clone());
+                if let Some(target_pod) = target_context.get("pod_name") {
+                    container_context.insert("target_pod_name".to_string(), target_pod.clone());
+                }
+            }
+        }
+    }
 
     Ok(SecurityEvent {
         timestamp: Some(Timestamp {
