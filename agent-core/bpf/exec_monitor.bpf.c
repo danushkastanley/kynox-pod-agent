@@ -167,16 +167,15 @@ char LICENSE[] SEC("license") = "GPL";
 static __always_inline bool check_rate_limit(__u32 pid) {
     __u64 now = bpf_ktime_get_ns();
     __u64 *last_time = bpf_map_lookup_elem(&rate_limit, &pid);
-    __u64 zero = 0;
 
     if (!last_time) {
         // First event for this PID
-        bpf_map_update_elem(&rate_limit, &pid, &now, BPF_ANY);
+        __u64 zero = now;
+        bpf_map_update_elem(&rate_limit, &pid, &zero, BPF_ANY);
         return true;
     }
 
     if (now - *last_time < RATE_LIMIT_INTERVAL / RATE_LIMIT_BURST) {
-        // Too many events in the burst window
         return false;
     }
 
@@ -187,8 +186,8 @@ static __always_inline bool check_rate_limit(__u32 pid) {
 
 // Helper to submit an event
 static __always_inline void submit_event(struct exec_monitor_event *e) {
-    // Apply rate limiting
     if (!check_rate_limit(e->pid)) {
+        bpf_ringbuf_discard(e, 0);
         return;
     }
     bpf_ringbuf_submit(e, 0);
@@ -198,28 +197,24 @@ static __always_inline void submit_event(struct exec_monitor_event *e) {
 static __always_inline void init_event(struct exec_monitor_event *e, __u32 type) {
     e->event_type = type;
     e->pid = bpf_get_current_pid_tgid() >> 32;
+    e->parent_pid = 0;  // Will be set by specific handlers if needed
+    e->child_pid = 0;   // Will be set by specific handlers if needed
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    // Ensure other fields are zeroed initially
-    e->parent_pid = 0;
-    e->child_pid = 0;
-    // Clearing union members - might be redundant depending on usage
-    // but good for explicit safety. Choose one representative member.
-    // Using bpf_memset or similar might be better if available and needed.
-    // For now, clearing filename is sufficient if it's the largest member.
-    for (int i = 0; i < FILENAME_LEN; i++) {
-       e->filename[i] = 0;
-    }
 }
 
 // Handler for execve syscall
 SEC("tp/syscalls/sys_enter_execve")
 int handle_execve(struct trace_event_raw_sys_enter *ctx) {
     struct exec_monitor_event *e;
+    int ret;
+
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) 
+        return 0;
 
     init_event(e, EVENT_TYPE_EXEC);
-    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]) < 0) {
+    ret = bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]);
+    if (ret < 0) {
         bpf_ringbuf_discard(e, 0);
         return 0;
     }
@@ -232,11 +227,15 @@ int handle_execve(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_enter_execveat")
 int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
      struct exec_monitor_event *e;
+    int ret;
+
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) 
+        return 0;
 
     init_event(e, EVENT_TYPE_EXEC); // Treat execveat same as execve for now
-    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]) < 0) {
+    ret = bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]);
+    if (ret < 0) {
         bpf_ringbuf_discard(e, 0);
         return 0;
     }
@@ -249,11 +248,15 @@ int handle_execveat(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_enter_open")
 int handle_open(struct trace_event_raw_sys_enter *ctx) {
      struct exec_monitor_event *e;
+    int ret;
+
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) 
+        return 0;
 
     init_event(e, EVENT_TYPE_OPEN);
-    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]) < 0) {
+    ret = bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[0]);
+    if (ret < 0) {
         bpf_ringbuf_discard(e, 0);
         return 0;
     }
@@ -266,11 +269,15 @@ int handle_open(struct trace_event_raw_sys_enter *ctx) {
 SEC("tp/syscalls/sys_enter_openat")
 int handle_openat(struct trace_event_raw_sys_enter *ctx) {
      struct exec_monitor_event *e;
+    int ret;
+
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) 
+        return 0;
 
     init_event(e, EVENT_TYPE_OPEN); // Treat openat same as open
-    if (bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]) < 0) {
+    ret = bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (void *)ctx->args[1]);
+    if (ret < 0) {
         bpf_ringbuf_discard(e, 0);
         return 0;
     }
@@ -632,10 +639,8 @@ int handle_bind(struct trace_event_raw_sys_enter *ctx)
     return 0;
 }
 
-// Handler for accept/accept4 syscalls
-SEC("tp/syscalls/sys_enter_accept")
-int handle_accept(struct trace_event_raw_sys_enter *ctx)
-{
+// Common handler for socket events
+static __always_inline int handle_socket_event(struct trace_event_raw_sys_enter *ctx, __u32 type) {
     struct exec_monitor_event *e;
 
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
@@ -643,24 +648,23 @@ int handle_accept(struct trace_event_raw_sys_enter *ctx)
         return 0;
     }
 
-    init_event(e, EVENT_TYPE_ACCEPT);
-    
-    // accept(sockfd, addr, addrlen)
+    init_event(e, type);
     e->sock_info.sock_fd = (int)ctx->args[0];
-
-    // We can't get client addr/port at syscall entry
-    // They will be filled by the kernel during accept
-    e->sock_info.addr = 0;
-    e->sock_info.port = 0;
+    e->sock_info.addr = 0;  // Will be filled by kernel during accept
+    e->sock_info.port = 0;  // Will be filled by kernel during accept
 
     submit_event(e);
     return 0;
 }
 
+SEC("tp/syscalls/sys_enter_accept")
+int handle_accept(struct trace_event_raw_sys_enter *ctx) {
+    return handle_socket_event(ctx, EVENT_TYPE_ACCEPT);
+}
+
 SEC("tp/syscalls/sys_enter_accept4")
-int handle_accept4(struct trace_event_raw_sys_enter *ctx)
-{
-    return handle_accept(ctx);
+int handle_accept4(struct trace_event_raw_sys_enter *ctx) {
+    return handle_socket_event(ctx, EVENT_TYPE_ACCEPT);
 }
 
 // Handler for chmod syscall
