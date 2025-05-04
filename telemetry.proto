@@ -55,14 +55,15 @@ enum EventType {
   SECCOMP = 13;
   SOCKET = 14;
   BIND = 15;
+  CHMOD = 16;
   // Added based on Rust match arms (may need BPF implementation)
-  EXIT = 16; 
-  READ = 17;
-  WRITE = 18;
-  CLOSE = 19; // Was also in Rust match
-  LISTEN = 20;
-  SEND = 21;
-  RECV = 22;
+  EXIT = 17; 
+  READ = 18;
+  WRITE = 19;
+  CLOSE = 20; // Was also in Rust match
+  LISTEN = 21;
+  SEND = 22;
+  RECV = 23;
 }
 
 // Security event message
@@ -81,6 +82,7 @@ message SecurityEvent {
   int32 gid = 14; // Group ID (for setgid)
   int64 ptrace_request = 15; // Ptrace request code
   int32 ptrace_target_pid = 16; // Ptrace target PID
+  int32 mode = 17; // File mode for chmod
   // Consider adding capabilities, return codes, etc.
   // uint64 capabilities = 13; // Example
   // int32 return_code = 14; // Example

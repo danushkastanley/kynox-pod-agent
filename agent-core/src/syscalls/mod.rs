@@ -1,6 +1,6 @@
 use anyhow::Result;
 use libbpf_rs::RingBufferBuilder;
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::net::Ipv4Addr;
@@ -89,12 +89,15 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
     // SAFETY: We've checked the size, assume the data layout matches the Event struct from BPF C code.
     let raw: &Event = unsafe { &*(data.as_ptr() as *const Event) };
 
+    // Log the event type for debugging
+    debug!("Received event type: {}", raw.event_type);
+
     // Initialize EventOutput, copying common fields from raw Event
     let mut event = EventOutput {
         event_type: raw.event_type,
         pid: raw.pid,
-        parent_pid: Some(raw.parent_pid), // Copy directly from raw event
-        child_pid: Some(raw.child_pid),   // Copy directly from raw event
+        parent_pid: Some(raw.parent_pid),
+        child_pid: Some(raw.child_pid),
         comm: cstr_to_string(&raw.comm),
         filename: None,
         daddr: None,
@@ -131,49 +134,29 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
     };
 
     match raw.event_type {
-        EVENT_TYPE_EXEC => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
-            // Directly access filename from the union for EXEC
-            event.filename = Some(cstr_to_string(unsafe { &raw.data.filename }));
-        }
-        EVENT_TYPE_OPEN => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
-            // Directly access filename from the union for OPEN
-            event.filename = Some(cstr_to_string(unsafe { &raw.data.filename }));
+        EVENT_TYPE_EXEC | EVENT_TYPE_OPEN => {
+            event.filename = Some(cstr_to_string(&unsafe { raw.data.filename }));
         }
         EVENT_TYPE_CONNECT => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
-            let info = unsafe { raw.data.net_info }; // Correct: uses net_info
-            let addr = Ipv4Addr::from(u32::from_be(info.daddr));
+            let net_info = unsafe { raw.data.net_info };
+            let addr = Ipv4Addr::from(u32::from_be(net_info.daddr));
             event.daddr = Some(addr.to_string());
-            event.dport = Some(info.dport);
-        }
-        EVENT_TYPE_ACCEPT => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
-            // ACCEPT uses sock_info according to C struct
-            let info = unsafe { raw.data.sock_info };
-            let addr = Ipv4Addr::from(u32::from_be(info.addr)); // Use sock_info.addr
-            event.daddr = Some(addr.to_string());
-            event.dport = Some(info.port); // Use sock_info.port
+            event.dport = Some(net_info.dport);
         }
         EVENT_TYPE_PTRACE => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.ptrace_info };
             event.ptrace_request = Some(info.request);
             event.ptrace_target_pid = Some(info.target_pid);
         }
         EVENT_TYPE_SETUID => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.setuid_info };
-            event.uid = Some(info.uid); // Correct field name is uid
+            event.uid = Some(info.uid);
         }
         EVENT_TYPE_SETGID => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.setgid_info };
-            event.gid = Some(info.gid); // Correct field name is gid
+            event.gid = Some(info.gid);
         }
         EVENT_TYPE_MOUNT => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.mount_info };
             event.mount_source = Some(cstr_to_string(&info.source));
             event.mount_target = Some(cstr_to_string(&info.target));
@@ -181,23 +164,19 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             event.mount_flags = Some(info.flags);
         }
         EVENT_TYPE_UMOUNT => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.umount_info };
             event.umount_target = Some(cstr_to_string(&info.target));
             event.umount_flags = Some(info.flags);
         }
         EVENT_TYPE_CAPSET => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.capset_info };
             event.cap_effective = Some(info.cap);
             event.cap_pid = Some(info.pid);
         }
         EVENT_TYPE_FORK => {
-            // Fork events only need the common fields (pid, parent_pid, child_pid, comm)
-            // which are already copied in the EventOutput initialization
+            // Fork events only need the common fields which are already copied
         }
         EVENT_TYPE_BPF_PROG => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.bpf_prog_info };
             event.bpf_cmd = Some(info.cmd);
             event.bpf_prog_type = Some(info.prog_type);
@@ -205,7 +184,6 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             event.bpf_license = Some(cstr_to_string(&info.license));
         }
         EVENT_TYPE_SECCOMP => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.seccomp_info };
             event.seccomp_operation = Some(match info.operation {
                 SECCOMP_PRCTL => "prctl".to_string(),
@@ -227,12 +205,11 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             });
             event.seccomp_flags = Some(info.flags);
         }
-        EVENT_TYPE_SOCKET | EVENT_TYPE_BIND => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
-            let info = unsafe { raw.data.sock_info }; // Assuming sock_info is correct
+        EVENT_TYPE_SOCKET | EVENT_TYPE_BIND | EVENT_TYPE_ACCEPT => {
+            let info = unsafe { raw.data.sock_info };
             event.socket_domain = Some(match info.domain {
-                libc::AF_INET => "AF_INET".to_string(),  // Use libc constants for clarity
-                libc::AF_INET6 => "AF_INET6".to_string(), // Use libc constants for clarity
+                libc::AF_INET => "AF_INET".to_string(),
+                libc::AF_INET6 => "AF_INET6".to_string(),
                 _ => format!("unknown({})", info.domain),
             });
             event.socket_type = Some(match info.type_ {
@@ -243,8 +220,7 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             });
             event.socket_protocol = Some(info.protocol);
             event.socket_fd = Some(info.sock_fd);
-            // BIND info is within sock_info
-            if raw.event_type == EVENT_TYPE_BIND { 
+            if raw.event_type == EVENT_TYPE_BIND {
                 if info.addr != 0 {
                     let addr = Ipv4Addr::from(u32::from_be(info.addr));
                     event.socket_addr = Some(addr.to_string());
@@ -253,14 +229,13 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             }
         }
         EVENT_TYPE_CHMOD => {
-            // SAFETY: Assumes event_type guarantees the correct union field is active.
             let info = unsafe { raw.data.chmod_info };
             event.chmod_path = Some(cstr_to_string(&info.path));
             event.chmod_mode = Some(info.mode);
         }
-        _ => {
-            warn!("Received unknown event type in parse_bpf_event: {}", raw.event_type);
-            return None; 
+        unknown_type => {
+            error!("Unknown event type received: {}. Known types are 0-15.", unknown_type);
+            return None;
         }
     }
     Some(event)

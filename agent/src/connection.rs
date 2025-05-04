@@ -215,6 +215,14 @@ impl ConnectionManager {
         self.session_id.as_deref()
     }
 
+    pub fn get_node_name(&self) -> &str {
+        &self.node_name
+    }
+
+    pub fn get_pod_name(&self) -> &str {
+        &self.pod_name
+    }
+
     pub fn is_connected(&self) -> bool {
         self.session_id.is_some() && self.is_healthy.load(Ordering::SeqCst)
     }
