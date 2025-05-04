@@ -8,6 +8,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
+#include <stdbool.h>
 
 // Define basic types if not available
 #ifndef __u8
@@ -148,10 +149,48 @@ struct {
     __uint(max_entries, 256 * 1024);
 } rb SEC(".maps");
 
+// Rate limiting map
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10000);
+    __type(key, __u32);
+    __type(value, __u64);
+} rate_limit SEC(".maps");
+
+// Rate limiting settings
+#define RATE_LIMIT_INTERVAL 1000000000ULL  // 1 second in nanoseconds
+#define RATE_LIMIT_BURST 100               // Maximum events per interval
+
 char LICENSE[] SEC("license") = "GPL";
+
+// Helper to check rate limit for a PID
+static __always_inline bool check_rate_limit(__u32 pid) {
+    __u64 now = bpf_ktime_get_ns();
+    __u64 *last_time = bpf_map_lookup_elem(&rate_limit, &pid);
+    __u64 zero = 0;
+
+    if (!last_time) {
+        // First event for this PID
+        bpf_map_update_elem(&rate_limit, &pid, &now, BPF_ANY);
+        return true;
+    }
+
+    if (now - *last_time < RATE_LIMIT_INTERVAL / RATE_LIMIT_BURST) {
+        // Too many events in the burst window
+        return false;
+    }
+
+    // Update last event time
+    bpf_map_update_elem(&rate_limit, &pid, &now, BPF_ANY);
+    return true;
+}
 
 // Helper to submit an event
 static __always_inline void submit_event(struct exec_monitor_event *e) {
+    // Apply rate limiting
+    if (!check_rate_limit(e->pid)) {
+        return;
+    }
     bpf_ringbuf_submit(e, 0);
 }
 
