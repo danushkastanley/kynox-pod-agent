@@ -63,7 +63,7 @@ struct sched_process_fork_args {
 #define EVENT_TYPE_SOCKET 12
 #define EVENT_TYPE_BIND 13
 #define EVENT_TYPE_ACCEPT 14
-#define EVENT_TYPE_CHMOD 15
+#define EVENT_TYPE_CHMOD 16
 
 // Network-related constants
 #define AF_INET6 10
