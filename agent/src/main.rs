@@ -41,7 +41,7 @@ const EVENT_TYPE_SECCOMP: u32 = 11;
 const EVENT_TYPE_SOCKET: u32 = 12;
 const EVENT_TYPE_BIND: u32 = 13;
 const EVENT_TYPE_ACCEPT: u32 = 14;
-const EVENT_TYPE_CHMOD: u32 = 23;
+const EVENT_TYPE_CHMOD: u32 = 16;
 const EVENT_TYPE_UNKNOWN: u32 = 15;
 
 // Original buffer sizes and timeouts
