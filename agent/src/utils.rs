@@ -58,6 +58,109 @@ pub fn get_container_context(pid: u32) -> Result<Option<HashMap<String, String>>
     Ok(Some(context))
 }
 
+/// Get comprehensive process context including host processes and control plane components
+pub fn get_comprehensive_process_context(pid: u32) -> Result<HashMap<String, String>> {
+    let mut context = HashMap::new();
+    
+    // First try to get container context
+    if let Ok(Some(container_ctx)) = get_container_context(pid) {
+        context.extend(container_ctx);
+        context.insert("process_type".to_string(), "containerized".to_string());
+    } else {
+        // This is a host process
+        context.insert("process_type".to_string(), "host".to_string());
+        
+        // Get process info from /proc
+        if let Ok(process_info) = get_host_process_info(pid) {
+            context.extend(process_info);
+        }
+    }
+    
+    // Add node information
+    if let Ok(node_name) = std::env::var("NODE_NAME") {
+        context.insert("node_name".to_string(), node_name);
+    }
+    
+    // Classify the process type
+    classify_process_type(&mut context, pid);
+    
+    Ok(context)
+}
+
+/// Get information about host processes
+fn get_host_process_info(pid: u32) -> Result<HashMap<String, String>> {
+    let mut info = HashMap::new();
+    
+    // Read process command line
+    let cmdline_path = format!("/proc/{}/cmdline", pid);
+    if let Ok(cmdline) = fs::read_to_string(&cmdline_path) {
+        info.insert("cmdline".to_string(), cmdline.replace('\0', " "));
+    }
+    
+    // Read process exe
+    let exe_path = format!("/proc/{}/exe", pid);
+    if let Ok(exe_link) = fs::read_link(&exe_path) {
+        if let Some(exe_str) = exe_link.to_str() {
+            info.insert("executable".to_string(), exe_str.to_string());
+        }
+    }
+    
+    // Read process status for additional info
+    let status_path = format!("/proc/{}/status", pid);
+    if let Ok(status) = fs::read_to_string(&status_path) {
+        for line in status.lines() {
+            if line.starts_with("PPid:") {
+                if let Some(ppid) = line.split_whitespace().nth(1) {
+                    info.insert("parent_pid".to_string(), ppid.to_string());
+                }
+            }
+        }
+    }
+    
+    Ok(info)
+}
+
+/// Classify process types for better monitoring
+fn classify_process_type(context: &mut HashMap<String, String>, pid: u32) {
+    if let Some(cmdline) = context.get("cmdline") {
+        let lower_cmdline = cmdline.to_lowercase();
+        
+        // Kubernetes control plane components
+        if lower_cmdline.contains("kube-apiserver") {
+            context.insert("component_type".to_string(), "kube-apiserver".to_string());
+            context.insert("control_plane".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("kube-controller-manager") {
+            context.insert("component_type".to_string(), "kube-controller-manager".to_string());
+            context.insert("control_plane".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("kube-scheduler") {
+            context.insert("component_type".to_string(), "kube-scheduler".to_string());
+            context.insert("control_plane".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("etcd") {
+            context.insert("component_type".to_string(), "etcd".to_string());
+            context.insert("control_plane".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("kubelet") {
+            context.insert("component_type".to_string(), "kubelet".to_string());
+            context.insert("node_agent".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("kube-proxy") {
+            context.insert("component_type".to_string(), "kube-proxy".to_string());
+            context.insert("node_agent".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("containerd") {
+            context.insert("component_type".to_string(), "containerd".to_string());
+            context.insert("container_runtime".to_string(), "true".to_string());
+        } else if lower_cmdline.contains("dockerd") {
+            context.insert("component_type".to_string(), "dockerd".to_string());
+            context.insert("container_runtime".to_string(), "true".to_string());
+        }
+    }
+    
+    // For containerized processes, check if they're system pods
+    if let Some(namespace) = context.get("namespace") {
+        if namespace == "kube-system" || namespace == "kube-public" || namespace == "kube-node-lease" {
+            context.insert("system_pod".to_string(), "true".to_string());
+        }
+    }
+}
+
 /// Parse container ID from cgroup content
 fn parse_container_id(cgroup_content: &str) -> Result<String> {
     for line in cgroup_content.lines() {
