@@ -59,45 +59,80 @@ pub fn get_container_context(pid: u32) -> Result<Option<HashMap<String, String>>
 }
 
 /// Get comprehensive process context including host processes and control plane components
+/// This function is designed to never fail and always return some context
 pub fn get_comprehensive_process_context(pid: u32) -> Result<HashMap<String, String>> {
     let mut context = HashMap::new();
     
-    // First try to get container context
-    if let Ok(Some(container_ctx)) = get_container_context(pid) {
-        context.extend(container_ctx);
-        context.insert("process_type".to_string(), "containerized".to_string());
-    } else {
-        // This is a host process
-        context.insert("process_type".to_string(), "host".to_string());
-        
-        // Get process info from /proc
-        if let Ok(process_info) = get_host_process_info(pid) {
-            context.extend(process_info);
+    // Always add basic process info
+    context.insert("pid".to_string(), pid.to_string());
+    
+    // First try to get container context (this is the most reliable)
+    match get_container_context(pid) {
+        Ok(Some(container_ctx)) => {
+            context.extend(container_ctx);
+            context.insert("process_type".to_string(), "containerized".to_string());
+        }
+        Ok(None) => {
+            // This is a host process - try to get host process info
+            context.insert("process_type".to_string(), "host".to_string());
+            
+            // Try to get process info from /proc (don't fail if this doesn't work)
+            if let Ok(process_info) = get_host_process_info(pid) {
+                context.extend(process_info);
+            } else {
+                // Even if we can't read process info, add what we can
+                context.insert("cmdline".to_string(), format!("unknown_pid_{}", pid));
+            }
+        }
+        Err(_) => {
+            // If even container context lookup fails, provide minimal context
+            context.insert("process_type".to_string(), "unknown".to_string());
+            context.insert("cmdline".to_string(), format!("error_reading_pid_{}", pid));
         }
     }
     
-    // Add node information
+    // Add node information (always available from env)
     if let Ok(node_name) = std::env::var("NODE_NAME") {
         context.insert("node_name".to_string(), node_name);
+    } else {
+        context.insert("node_name".to_string(), "unknown".to_string());
     }
     
-    // Classify the process type
+    // Classify the process type (this should never fail now)
     classify_process_type(&mut context, pid);
     
     Ok(context)
 }
 
 /// Get information about host processes
+/// This function is more robust and handles cases where processes disappear during read
 fn get_host_process_info(pid: u32) -> Result<HashMap<String, String>> {
     let mut info = HashMap::new();
     
-    // Read process command line
-    let cmdline_path = format!("/proc/{}/cmdline", pid);
-    if let Ok(cmdline) = fs::read_to_string(&cmdline_path) {
-        info.insert("cmdline".to_string(), cmdline.replace('\0', " "));
+    // Check if process exists first
+    let proc_dir = format!("/proc/{}", pid);
+    if !Path::new(&proc_dir).exists() {
+        return Err(anyhow!("Process {} no longer exists", pid));
     }
     
-    // Read process exe
+    // Read process command line (this is the most reliable)
+    let cmdline_path = format!("/proc/{}/cmdline", pid);
+    match fs::read_to_string(&cmdline_path) {
+        Ok(cmdline) => {
+            let clean_cmdline = cmdline.replace('\0', " ").trim().to_string();
+            if !clean_cmdline.is_empty() {
+                info.insert("cmdline".to_string(), clean_cmdline);
+            } else {
+                info.insert("cmdline".to_string(), format!("kernel_thread_{}", pid));
+            }
+        }
+        Err(_) => {
+            // Process might have disappeared or be a kernel thread
+            info.insert("cmdline".to_string(), format!("unavailable_pid_{}", pid));
+        }
+    }
+    
+    // Try to read process exe (optional, often fails for kernel threads)
     let exe_path = format!("/proc/{}/exe", pid);
     if let Ok(exe_link) = fs::read_link(&exe_path) {
         if let Some(exe_str) = exe_link.to_str() {
@@ -105,7 +140,7 @@ fn get_host_process_info(pid: u32) -> Result<HashMap<String, String>> {
         }
     }
     
-    // Read process status for additional info
+    // Try to read process status for additional info (optional)
     let status_path = format!("/proc/{}/status", pid);
     if let Ok(status) = fs::read_to_string(&status_path) {
         for line in status.lines() {
@@ -113,6 +148,7 @@ fn get_host_process_info(pid: u32) -> Result<HashMap<String, String>> {
                 if let Some(ppid) = line.split_whitespace().nth(1) {
                     info.insert("parent_pid".to_string(), ppid.to_string());
                 }
+                break; // We only need PPid
             }
         }
     }
