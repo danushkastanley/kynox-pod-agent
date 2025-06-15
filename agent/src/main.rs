@@ -54,7 +54,7 @@ const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_RETRIES: usize = 3;             
 
 mod utils;
-use utils::get_container_context;
+use utils::{get_container_context, get_comprehensive_process_context};
 
 #[derive(Debug, Clone)]
 struct AgentConfig {
@@ -311,16 +311,29 @@ fn convert_eventoutput_to_securityevent(event: &EventOutput, conn_manager: &Conn
 
     let mut container_context = std::collections::HashMap::new();
     
-    // First try to get container context for the process
-    if let Ok(Some(process_context)) = get_container_context(event.pid as u32) {
-        container_context.extend(process_context);
-    } else {
-        // Fallback to agent's context if process container lookup fails
-        container_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
-        container_context.insert("node_name".to_string(), conn_manager.get_node_name().to_string());
-        container_context.insert("pod_name".to_string(), conn_manager.get_pod_name().to_string());
-        container_context.insert("namespace".to_string(), env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string()));
-        container_context.insert("container_id".to_string(), env::var("CONTAINER_ID").unwrap_or_else(|_| "unknown".to_string()));
+    // Get comprehensive process context (containerized and host processes)
+    // Note: get_comprehensive_process_context now never fails, but we keep fallback for safety
+    match get_comprehensive_process_context(event.pid as u32) {
+        Ok(mut process_context) => {
+            // Always ensure we have agent context
+            process_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
+            process_context.insert("agent_node".to_string(), conn_manager.get_node_name().to_string());
+            process_context.insert("agent_pod".to_string(), conn_manager.get_pod_name().to_string());
+            
+            container_context.extend(process_context);
+        }
+        Err(e) => {
+            // This should rarely happen now, but provide full fallback
+            debug!("Process context lookup failed for PID {}: {}", event.pid, e);
+            
+            container_context.insert("agent_id".to_string(), conn_manager.get_agent_id().to_string());
+            container_context.insert("node_name".to_string(), conn_manager.get_node_name().to_string());
+            container_context.insert("pod_name".to_string(), conn_manager.get_pod_name().to_string());
+            container_context.insert("namespace".to_string(), env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string()));
+            container_context.insert("container_id".to_string(), env::var("CONTAINER_ID").unwrap_or_else(|_| "unknown".to_string()));
+            container_context.insert("process_type".to_string(), "fallback".to_string());
+            container_context.insert("pid".to_string(), event.pid.to_string());
+        }
     }
 
     // For fork events, also try to get parent process container context
