@@ -10,55 +10,37 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# ─── Configuration ──────────────────────────────────────────────────────────────
-IMAGE_NAME="pod-agent"
-IMAGE_TAG="latest"                     # change to a version if you want history
-FULL_REF="docker.io/library/${IMAGE_NAME}:${IMAGE_TAG}"
-TAR_FILE="${IMAGE_NAME}.oci.tar"       # lives only for a few seconds
-YAML_FILES=("network-policy.yaml" "pod-agent-daemonset.yaml")  # All YAML files in order
+echo "🔄 Redeploying pod-agent with container identification fixes..."
 
-# ─── Build image → OCI tarball only (skips Docker's local image store) ─────────
-echo "🛠️  (1/7) Building ${FULL_REF} to OCI tarball…"
-docker buildx build \
-  --progress=plain \
-  --tag "${FULL_REF}" \
-  --output "type=oci,dest=${TAR_FILE}" \
-  .
+# Delete the existing daemonset
+echo "📉 Removing existing pod-agent daemonset..."
+kubectl delete daemonset pod-agent-ds --ignore-not-found=true
 
-# ─── Remove *all* dangling data from Docker (no layers kept) ───────────────────
-echo "🧹 (2/7) Docker: pruning unused objects…"
-docker system prune -af --volumes
+# Wait for pods to terminate
+echo "⏳ Waiting for pod-agent pods to terminate..."
+sleep 5
 
-# ─── Import the tarball into containerd & drop the tar ─────────────────────────
-echo "💾 (3/7) Importing image into k3s containerd..."
-sudo k3s ctr --namespace k8s.io images import "${TAR_FILE}"
-if [ $? -ne 0 ]; then
-    echo "❌ Image import failed!"
-fi
-rm -f "${TAR_FILE}"
+# Rebuild the image
+echo "🔨 Rebuilding pod-agent image..."
+docker build -t pod-agent:latest .
 
-# ─── Prune unused / old images in containerd (keeps ones in use) ───────────────
-echo "🧹 (4/7) containerd: pruning unused images..."
-# sudo k3s crictl rmi --prune # <<< Commented out - seems too aggressive
+# Import image into k3s
+echo "📦 Importing image into k3s..."
+docker save pod-agent:latest | sudo k3s ctr images import -
 
-# ─── Delete existing resources ─────────────────────────────────────────────────
-echo "🗑️  (5/7) Removing existing resources..."
-kubectl delete networkpolicy rasp-network-policy --ignore-not-found
-kubectl delete pod -l "app=${IMAGE_NAME}" --force --grace-period=0 --ignore-not-found
+# Deploy the updated daemonset
+echo "🚀 Deploying updated pod-agent daemonset..."
+kubectl apply -f pod-agent-daemonset.yaml
 
-# ─── Apply all YAML files in order ────────────────────────────────────────────
-echo "🚀 (6/7) Applying Kubernetes resources..."
-for yaml in "${YAML_FILES[@]}"; do
-    if [ -f "$yaml" ]; then
-        echo "📄 Applying $yaml..."
-        kubectl apply -f "$yaml"
-    else
-        echo "⚠️  Warning: $yaml not found"
-    fi
-done
+# Wait for deployment
+echo "⏳ Waiting for pods to be ready..."
+kubectl rollout status daemonset/pod-agent-ds --timeout=120s
 
-# ─── Wait for pods to be ready ────────────────────────────────────────────────
-echo "⏳ (7/7) Waiting for pods to be ready..."
-kubectl wait --for=condition=ready pod -l "app=${IMAGE_NAME}" --timeout=60s
+# Show status
+echo "✅ Pod-agent redeployment complete!"
+echo "📊 Current status:"
+kubectl get pods -l app=pod-agent
 
-echo "✅ Deployment complete!"
+echo ""
+echo "🔍 To check logs:"
+echo "kubectl logs -l app=pod-agent -f"

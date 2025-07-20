@@ -27,11 +27,21 @@ pub fn get_container_context(pid: u32) -> Result<Option<HashMap<String, String>>
     let config = match fs::read_to_string(&config_path) {
         Ok(content) => content,
         Err(e) => {
+            debug!("Failed to read Docker config at {}: {}", config_path, e);
             // Try containerd path
             let containerd_path = format!("/run/containerd/containers/{}/config.json", container_id);
-            fs::read_to_string(&containerd_path).map_err(|_| {
-                anyhow!("Failed to read container config from both Docker and containerd paths: {}", e)
-            })?
+            match fs::read_to_string(&containerd_path) {
+                Ok(content) => content,
+                Err(e2) => {
+                    debug!("Failed to read containerd config at {}: {}", containerd_path, e2);
+                    // Try k3s containerd path
+                    let k3s_containerd_path = format!("/var/lib/containerd/containers/{}/config.json", container_id);
+                    fs::read_to_string(&k3s_containerd_path).map_err(|e3| {
+                        debug!("Failed to read k3s containerd config at {}: {}", k3s_containerd_path, e3);
+                        anyhow!("Failed to read container config from Docker ({}), containerd ({}), or k3s containerd ({})", e, e2, e3)
+                    })?
+                }
+            }
         }
     };
 
@@ -60,11 +70,16 @@ pub fn get_container_context(pid: u32) -> Result<Option<HashMap<String, String>>
 
 /// Parse container ID from cgroup content
 fn parse_container_id(cgroup_content: &str) -> Result<String> {
+    debug!("Parsing cgroup content: {}", cgroup_content);
+    
     for line in cgroup_content.lines() {
+        debug!("Processing cgroup line: {}", line);
+        
         // Check for docker
         if line.contains("docker") {
             if let Some(id) = line.split('/')
                 .find(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())) {
+                debug!("Found Docker container ID: {}", id);
                 return Ok(id.to_string());
             }
         }
@@ -72,9 +87,27 @@ fn parse_container_id(cgroup_content: &str) -> Result<String> {
         if line.contains("containerd") {
             if let Some(id) = line.split('/')
                 .find(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())) {
+                debug!("Found containerd container ID: {}", id);
                 return Ok(id.to_string());
             }
         }
+        // Check for k3s cgroup format (may have different patterns)
+        if line.contains("kubepods") && (line.contains("pod") || line.contains("cri-containerd")) {
+            // Look for container ID in k3s/containerd format
+            let parts: Vec<&str> = line.split('/').collect();
+            for part in parts {
+                if part.len() == 64 && part.chars().all(|c| c.is_ascii_hexdigit()) {
+                    debug!("Found k3s/containerd container ID: {}", part);
+                    return Ok(part.to_string());
+                }
+                // Also check for shorter container IDs (sometimes truncated)
+                if part.len() >= 12 && part.len() <= 64 && part.chars().all(|c| c.is_ascii_hexdigit()) {
+                    debug!("Found potential short container ID: {}", part);
+                    return Ok(part.to_string());
+                }
+            }
+        }
     }
+    debug!("No container ID found in cgroup content");
     Ok(String::new()) // Not in a container
 }
