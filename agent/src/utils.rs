@@ -22,19 +22,46 @@ pub fn get_container_context(pid: u32) -> Result<Option<HashMap<String, String>>
         return Ok(None); // Not running in a container
     }
 
-    // Simple fallback approach - just return basic info
+    // Read container config
+    let config_path = format!("/var/lib/docker/containers/{}/config.v2.json", container_id);
+    let config = match fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(e) => {
+            debug!("Failed to read Docker config at {}: {}", config_path, e);
+            // Try containerd path
+            let containerd_path = format!("/run/containerd/containers/{}/config.json", container_id);
+            match fs::read_to_string(&containerd_path) {
+                Ok(content) => content,
+                Err(e2) => {
+                    debug!("Failed to read containerd config at {}: {}", containerd_path, e2);
+                    // Try k3s containerd path
+                    let k3s_containerd_path = format!("/var/lib/containerd/containers/{}/config.json", container_id);
+                    fs::read_to_string(&k3s_containerd_path).map_err(|e3| {
+                        debug!("Failed to read k3s containerd config at {}: {}", k3s_containerd_path, e3);
+                        anyhow!("Failed to read container config from Docker ({}), containerd ({}), or k3s containerd ({})", e, e2, e3)
+                    })?
+                }
+            }
+        }
+    };
+
+    // Parse container config
+    let config: serde_json::Value = serde_json::from_str(&config)?;
+    
     let mut context = HashMap::new();
     context.insert("container_id".to_string(), container_id.clone());
-    
-    // For demo purposes, add basic pod info based on known patterns
-    if cgroup_content.contains("demo") {
-        context.insert("pod_name".to_string(), "demo-target".to_string());
-        context.insert("namespace".to_string(), "default".to_string());
-        context.insert("container_name".to_string(), "demo-target".to_string());
-    } else {
-        context.insert("pod_name".to_string(), "unknown".to_string());
-        context.insert("namespace".to_string(), "default".to_string());
-        context.insert("container_name".to_string(), "unknown".to_string());
+
+    // Extract kubernetes metadata if available
+    if let Some(labels) = config.get("Labels").and_then(|l| l.as_object()) {
+        if let Some(pod) = labels.get("io.kubernetes.pod.name").and_then(|v| v.as_str()) {
+            context.insert("pod_name".to_string(), pod.to_string());
+        }
+        if let Some(ns) = labels.get("io.kubernetes.pod.namespace").and_then(|v| v.as_str()) {
+            context.insert("namespace".to_string(), ns.to_string());
+        }
+        if let Some(container) = labels.get("io.kubernetes.container.name").and_then(|v| v.as_str()) {
+            context.insert("container_name".to_string(), container.to_string());
+        }
     }
 
     debug!("Found container context for PID {}: {:?}", pid, context);
@@ -78,6 +105,17 @@ fn parse_container_id(cgroup_content: &str) -> Result<String> {
                 .find(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())) {
                 debug!("Found containerd container ID: {}", id);
                 return Ok(id.to_string());
+            }
+        }
+        
+        // Fallback: look for any long hex string in kubepods paths
+        if line.contains("kubepods") {
+            let parts: Vec<&str> = line.split('/').collect();
+            for part in parts {
+                if part.len() >= 32 && part.len() <= 128 && part.chars().all(|c| c.is_ascii_hexdigit()) {
+                    debug!("Found potential container ID in kubepods: {}", part);
+                    return Ok(part.to_string());
+                }
             }
         }
     }
