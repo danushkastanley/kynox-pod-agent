@@ -140,38 +140,34 @@ fn extract_pod_info_from_cgroup(cgroup_content: &str) -> Option<HashMap<String, 
     for line in cgroup_content.lines() {
         debug!("Processing cgroup line for pod info: {}", line);
         
-        // Look for kubepods patterns with pod UUID
-        if line.contains("kubepods") {
-            debug!("Found kubepods line: {}", line);
+        // Simple direct extraction - look for the exact pattern
+        if line.contains("kubepods-burstable-pod") && line.contains(".slice") {
+            debug!("Found kubepods line with burstable pod: {}", line);
             
-            // Look for pod UUID in kubepods-burstable-pod[UUID].slice format
-            if let Some(pod_start) = line.find("kubepods-burstable-pod") {
-                let after_pod_prefix = &line[pod_start + "kubepods-burstable-pod".len()..];
-                debug!("After 'kubepods-burstable-pod': {}", after_pod_prefix);
+            // Find the start and end of the UUID
+            if let Some(start) = line.find("kubepods-burstable-pod") {
+                let uuid_start = start + "kubepods-burstable-pod".len();
+                let remainder = &line[uuid_start..];
                 
-                if let Some(slice_end) = after_pod_prefix.find(".slice") {
-                    let pod_uuid = &after_pod_prefix[..slice_end];
-                    debug!("Found pod UUID from kubepods-burstable-pod: {}", pod_uuid);
+                if let Some(end) = remainder.find(".slice") {
+                    let pod_uuid = &remainder[..end];
+                    debug!("Extracted pod UUID: '{}'", pod_uuid);
                     
-                    // Validate it looks like a UUID (hex digits and underscores)
-                    if is_valid_pod_uuid(pod_uuid) {
-                        return create_pod_info_from_uuid(pod_uuid, line);
-                    }
-                }
-            }
-            
-            // Alternative: look for any pod[UUID].slice pattern
-            if let Some(pod_start) = line.find("pod") {
-                let after_pod = &line[pod_start + 3..]; // Skip "pod"
-                debug!("After 'pod': {}", after_pod);
-                
-                if let Some(slice_end) = after_pod.find(".slice") {
-                    let pod_uuid = &after_pod[..slice_end];
-                    debug!("Found pod UUID from pod prefix: {}", pod_uuid);
-                    
-                    // Validate it looks like a UUID
-                    if is_valid_pod_uuid(pod_uuid) {
-                        return create_pod_info_from_uuid(pod_uuid, line);
+                    // Simple validation - should contain underscores and be reasonable length
+                    if pod_uuid.len() > 10 && pod_uuid.contains('_') {
+                        let mut pod_info = HashMap::new();
+                        let short_uuid = if pod_uuid.len() >= 8 { &pod_uuid[..8] } else { pod_uuid };
+                        
+                        // Create pod info
+                        pod_info.insert("pod_name".to_string(), format!("pod-{}", short_uuid));
+                        pod_info.insert("container_name".to_string(), "container".to_string());
+                        pod_info.insert("namespace".to_string(), "default".to_string());
+                        pod_info.insert("pod_uuid".to_string(), pod_uuid.to_string());
+                        
+                        debug!("SUCCESS: Created pod info: {:?}", pod_info);
+                        return Some(pod_info);
+                    } else {
+                        debug!("UUID validation failed for: '{}'", pod_uuid);
                     }
                 }
             }
@@ -180,43 +176,4 @@ fn extract_pod_info_from_cgroup(cgroup_content: &str) -> Option<HashMap<String, 
     
     debug!("No pod info extracted from cgroup");
     None
-}
-
-/// Check if a string looks like a valid Kubernetes pod UUID
-fn is_valid_pod_uuid(uuid: &str) -> bool {
-    // Kubernetes UUIDs are typically 8-4-4-4-12 hex digits separated by underscores
-    // Example: 85676363_556c_4ec2_988b_eac1b98fbb66
-    uuid.len() >= 20 && 
-    uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '_') &&
-    uuid.contains('_')
-}
-
-/// Create pod info from UUID and cgroup line
-fn create_pod_info_from_uuid(pod_uuid: &str, cgroup_line: &str) -> Option<HashMap<String, String>> {
-    let mut pod_info = HashMap::new();
-    let short_uuid = if pod_uuid.len() >= 8 { &pod_uuid[..8] } else { pod_uuid };
-    
-    debug!("Creating pod info for UUID: {} (short: {})", pod_uuid, short_uuid);
-    
-    // Try to map known demo pods based on cgroup line content
-    if cgroup_line.contains("demo") || pod_uuid.contains("demo") {
-        pod_info.insert("pod_name".to_string(), "demo-target".to_string());
-        pod_info.insert("container_name".to_string(), "demo-target".to_string());
-    } else if cgroup_line.contains("rasp-controller") || cgroup_line.contains("controller") {
-        pod_info.insert("pod_name".to_string(), "rasp-controller".to_string());
-        pod_info.insert("container_name".to_string(), "controller".to_string());
-    } else if cgroup_line.contains("pod-agent") || cgroup_line.contains("agent") {
-        pod_info.insert("pod_name".to_string(), "pod-agent".to_string());
-        pod_info.insert("container_name".to_string(), "pod-agent".to_string());
-    } else {
-        // Generic naming based on UUID
-        pod_info.insert("pod_name".to_string(), format!("pod-{}", short_uuid));
-        pod_info.insert("container_name".to_string(), "unknown".to_string());
-    }
-    
-    pod_info.insert("namespace".to_string(), "default".to_string());
-    pod_info.insert("pod_uuid".to_string(), pod_uuid.to_string());
-    
-    debug!("Created pod info from cgroup: {:?}", pod_info);
-    Some(pod_info)
 }
