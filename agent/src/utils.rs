@@ -140,34 +140,38 @@ fn extract_pod_info_from_cgroup(cgroup_content: &str) -> Option<HashMap<String, 
     for line in cgroup_content.lines() {
         debug!("Processing cgroup line for pod info: {}", line);
         
-        // Simple direct extraction - look for the exact pattern
-        if line.contains("kubepods-burstable-pod") && line.contains(".slice") {
-            debug!("Found kubepods line with burstable pod: {}", line);
-            
-            // Find the start and end of the UUID
-            if let Some(start) = line.find("kubepods-burstable-pod") {
-                let uuid_start = start + "kubepods-burstable-pod".len();
-                let remainder = &line[uuid_start..];
+        // Look for both burstable and besteffort pods
+        let prefixes = ["kubepods-burstable-pod", "kubepods-besteffort-pod"];
+        
+        for prefix in &prefixes {
+            if line.contains(prefix) && line.contains(".slice") {
+                debug!("Found kubepods line with prefix '{}': {}", prefix, line);
                 
-                if let Some(end) = remainder.find(".slice") {
-                    let pod_uuid = &remainder[..end];
-                    debug!("Extracted pod UUID: '{}'", pod_uuid);
+                // Find the start and end of the UUID
+                if let Some(start) = line.find(prefix) {
+                    let uuid_start = start + prefix.len();
+                    let remainder = &line[uuid_start..];
                     
-                    // Simple validation - should contain underscores and be reasonable length
-                    if pod_uuid.len() > 10 && pod_uuid.contains('_') {
-                        let mut pod_info = HashMap::new();
-                        let short_uuid = if pod_uuid.len() >= 8 { &pod_uuid[..8] } else { pod_uuid };
+                    if let Some(end) = remainder.find(".slice") {
+                        let pod_uuid = &remainder[..end];
+                        debug!("Extracted pod UUID: '{}'", pod_uuid);
                         
-                        // Create pod info
-                        pod_info.insert("pod_name".to_string(), format!("pod-{}", short_uuid));
-                        pod_info.insert("container_name".to_string(), "container".to_string());
-                        pod_info.insert("namespace".to_string(), "default".to_string());
-                        pod_info.insert("pod_uuid".to_string(), pod_uuid.to_string());
-                        
-                        debug!("SUCCESS: Created pod info: {:?}", pod_info);
-                        return Some(pod_info);
-                    } else {
-                        debug!("UUID validation failed for: '{}'", pod_uuid);
+                        // Simple validation - should contain underscores and be reasonable length
+                        if pod_uuid.len() > 10 && pod_uuid.contains('_') {
+                            let mut pod_info = HashMap::new();
+                            let short_uuid = if pod_uuid.len() >= 8 { &pod_uuid[..8] } else { pod_uuid };
+                            
+                            // Create pod info
+                            pod_info.insert("pod_name".to_string(), format!("pod-{}", short_uuid));
+                            pod_info.insert("container_name".to_string(), "container".to_string());
+                            pod_info.insert("namespace".to_string(), "default".to_string());
+                            pod_info.insert("pod_uuid".to_string(), pod_uuid.to_string());
+                            
+                            debug!("SUCCESS: Created pod info: {:?}", pod_info);
+                            return Some(pod_info);
+                        } else {
+                            debug!("UUID validation failed for: '{}'", pod_uuid);
+                        }
                     }
                 }
             }
