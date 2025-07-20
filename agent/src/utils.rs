@@ -135,46 +135,54 @@ fn parse_container_id(cgroup_content: &str) -> Result<String> {
 /// Extract pod info from cgroup content
 fn extract_pod_info_from_cgroup(cgroup_content: &str) -> Option<HashMap<String, String>> {
     debug!("Extracting pod info from cgroup content");
+    debug!("Full cgroup content: {}", cgroup_content);
     
     for line in cgroup_content.lines() {
         debug!("Processing cgroup line for pod info: {}", line);
         
         // Look for kubepods patterns with pod UUID
-        if line.contains("kubepods") && line.contains("pod") {
-            let mut pod_info = HashMap::new();
+        if line.contains("kubepods") {
+            debug!("Found kubepods line: {}", line);
             
-            // Extract pod UUID from patterns like: kubepods-burstable-pod[UUID].slice
+            // Look for pod UUID in various formats
+            // Format 1: kubepods-burstable-pod[UUID].slice  
             if let Some(pod_start) = line.find("pod") {
                 let after_pod = &line[pod_start + 3..]; // Skip "pod"
+                debug!("After 'pod': {}", after_pod);
+                
+                // Look for UUID before .slice
                 if let Some(slice_end) = after_pod.find(".slice") {
                     let pod_uuid = &after_pod[..slice_end];
-                    debug!("Found pod UUID: {}", pod_uuid);
+                    debug!("Found pod UUID from .slice: {}", pod_uuid);
                     
-                    // For demo purposes, create meaningful names based on UUID patterns
                     if pod_uuid.len() >= 8 {
-                        let short_uuid = &pod_uuid[..8];
+                        return create_pod_info_from_uuid(pod_uuid, line);
+                    }
+                }
+                
+                // Look for UUID before /cri-containerd (alternative format)
+                if let Some(cri_start) = after_pod.find("/cri-containerd") {
+                    let pod_uuid = &after_pod[..cri_start];
+                    debug!("Found pod UUID from /cri-containerd: {}", pod_uuid);
+                    
+                    if pod_uuid.len() >= 8 {
+                        return create_pod_info_from_uuid(pod_uuid, line);
+                    }
+                }
+            }
+            
+            // Alternative: look for pod info in the path segments
+            let segments: Vec<&str> = line.split('/').collect();
+            for segment in &segments {
+                if segment.starts_with("pod") && segment.len() > 10 {
+                    let pod_uuid = &segment[3..]; // Remove "pod" prefix
+                    if let Some(dot_pos) = pod_uuid.find('.') {
+                        let clean_uuid = &pod_uuid[..dot_pos];
+                        debug!("Found pod UUID from segment: {}", clean_uuid);
                         
-                        // Try to map known demo pods
-                        if line.contains("demo") || pod_uuid.contains("demo") {
-                            pod_info.insert("pod_name".to_string(), "demo-target".to_string());
-                            pod_info.insert("container_name".to_string(), "demo-target".to_string());
-                        } else if line.contains("rasp-controller") || pod_uuid.contains("controller") {
-                            pod_info.insert("pod_name".to_string(), "rasp-controller".to_string());
-                            pod_info.insert("container_name".to_string(), "controller".to_string());
-                        } else if line.contains("pod-agent") || pod_uuid.contains("agent") {
-                            pod_info.insert("pod_name".to_string(), "pod-agent".to_string());
-                            pod_info.insert("container_name".to_string(), "pod-agent".to_string());
-                        } else {
-                            // Generic naming based on UUID
-                            pod_info.insert("pod_name".to_string(), format!("pod-{}", short_uuid));
-                            pod_info.insert("container_name".to_string(), "unknown".to_string());
+                        if clean_uuid.len() >= 8 {
+                            return create_pod_info_from_uuid(clean_uuid, line);
                         }
-                        
-                        pod_info.insert("namespace".to_string(), "default".to_string());
-                        pod_info.insert("pod_uuid".to_string(), pod_uuid.to_string());
-                        
-                        debug!("Created pod info from cgroup: {:?}", pod_info);
-                        return Some(pod_info);
                     }
                 }
             }
@@ -183,4 +191,34 @@ fn extract_pod_info_from_cgroup(cgroup_content: &str) -> Option<HashMap<String, 
     
     debug!("No pod info extracted from cgroup");
     None
+}
+
+/// Create pod info from UUID and cgroup line
+fn create_pod_info_from_uuid(pod_uuid: &str, cgroup_line: &str) -> Option<HashMap<String, String>> {
+    let mut pod_info = HashMap::new();
+    let short_uuid = if pod_uuid.len() >= 8 { &pod_uuid[..8] } else { pod_uuid };
+    
+    debug!("Creating pod info for UUID: {} (short: {})", pod_uuid, short_uuid);
+    
+    // Try to map known demo pods based on cgroup line content
+    if cgroup_line.contains("demo") || pod_uuid.contains("demo") {
+        pod_info.insert("pod_name".to_string(), "demo-target".to_string());
+        pod_info.insert("container_name".to_string(), "demo-target".to_string());
+    } else if cgroup_line.contains("rasp-controller") || cgroup_line.contains("controller") {
+        pod_info.insert("pod_name".to_string(), "rasp-controller".to_string());
+        pod_info.insert("container_name".to_string(), "controller".to_string());
+    } else if cgroup_line.contains("pod-agent") || cgroup_line.contains("agent") {
+        pod_info.insert("pod_name".to_string(), "pod-agent".to_string());
+        pod_info.insert("container_name".to_string(), "pod-agent".to_string());
+    } else {
+        // Generic naming based on UUID
+        pod_info.insert("pod_name".to_string(), format!("pod-{}", short_uuid));
+        pod_info.insert("container_name".to_string(), "unknown".to_string());
+    }
+    
+    pod_info.insert("namespace".to_string(), "default".to_string());
+    pod_info.insert("pod_uuid".to_string(), pod_uuid.to_string());
+    
+    debug!("Created pod info from cgroup: {:?}", pod_info);
+    Some(pod_info)
 }
