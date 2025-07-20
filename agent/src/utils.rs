@@ -75,7 +75,22 @@ fn parse_container_id(cgroup_content: &str) -> Result<String> {
     for line in cgroup_content.lines() {
         debug!("Processing cgroup line: {}", line);
         
-        // Check for docker
+        // Check for k3s containerd format: cri-containerd-{id}.scope
+        if line.contains("cri-containerd-") {
+            // Extract the container ID between "cri-containerd-" and ".scope"
+            if let Some(start) = line.find("cri-containerd-") {
+                let after_prefix = &line[start + "cri-containerd-".len()..];
+                if let Some(end) = after_prefix.find(".scope") {
+                    let container_id = &after_prefix[..end];
+                    if container_id.len() >= 12 && container_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                        debug!("Found k3s containerd container ID: {}", container_id);
+                        return Ok(container_id.to_string());
+                    }
+                }
+            }
+        }
+        
+        // Check for standard docker format
         if line.contains("docker") {
             if let Some(id) = line.split('/')
                 .find(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())) {
@@ -83,26 +98,22 @@ fn parse_container_id(cgroup_content: &str) -> Result<String> {
                 return Ok(id.to_string());
             }
         }
-        // Check for containerd
-        if line.contains("containerd") {
+        
+        // Check for standard containerd format  
+        if line.contains("containerd") && !line.contains("cri-containerd") {
             if let Some(id) = line.split('/')
                 .find(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())) {
                 debug!("Found containerd container ID: {}", id);
                 return Ok(id.to_string());
             }
         }
-        // Check for k3s cgroup format (may have different patterns)
-        if line.contains("kubepods") && (line.contains("pod") || line.contains("cri-containerd")) {
-            // Look for container ID in k3s/containerd format
+        
+        // Fallback: look for any long hex string in kubepods paths
+        if line.contains("kubepods") {
             let parts: Vec<&str> = line.split('/').collect();
             for part in parts {
-                if part.len() == 64 && part.chars().all(|c| c.is_ascii_hexdigit()) {
-                    debug!("Found k3s/containerd container ID: {}", part);
-                    return Ok(part.to_string());
-                }
-                // Also check for shorter container IDs (sometimes truncated)
-                if part.len() >= 12 && part.len() <= 64 && part.chars().all(|c| c.is_ascii_hexdigit()) {
-                    debug!("Found potential short container ID: {}", part);
+                if part.len() >= 32 && part.len() <= 128 && part.chars().all(|c| c.is_ascii_hexdigit()) {
+                    debug!("Found potential container ID in kubepods: {}", part);
                     return Ok(part.to_string());
                 }
             }
