@@ -28,9 +28,9 @@ spec:
         - name: CONTROLLER_ENDPOINT
           value: "rasp-controller.default.svc:50051"  # Removed http:// prefix for gRPC
         - name: RUST_LOG
-          value: "info"  # Changed from debug to reduce noise
+          value: "info"   # Set to info level to reduce log noise
         - name: DEBUG
-          value: "info"  # Set to "debug" for verbose logging
+          value: "info"   # Set to info level to reduce log noise
         - name: NODE_NAME
           valueFrom:
             fieldRef:
@@ -61,6 +61,21 @@ spec:
         - name: kernel-modules
           mountPath: /lib/modules
           readOnly: true
+        # Add containerd runtime access for container identification
+        - name: containerd-run
+          mountPath: /run/containerd
+          readOnly: true
+        - name: containerd-data
+          mountPath: /var/lib/containerd
+          readOnly: true
+        # Add docker runtime access as fallback
+        - name: docker-data
+          mountPath: /var/lib/docker
+          readOnly: true
+        # Add k3s containerd socket
+        - name: k3s-containerd-sock
+          mountPath: /run/k3s/containerd/containerd.sock
+          readOnly: true
       terminationGracePeriodSeconds: 30
       volumes:                        # Define the hostPath volumes
       - name: sys-kernel-debug
@@ -79,3 +94,22 @@ spec:
         hostPath:
           path: /lib/modules
           type: Directory
+      # Add containerd runtime access for container identification
+      - name: containerd-run
+        hostPath:
+          path: /run/containerd
+          type: DirectoryOrCreate
+      - name: containerd-data
+        hostPath:
+          path: /var/lib/containerd
+          type: DirectoryOrCreate
+      # Add docker runtime access as fallback
+      - name: docker-data
+        hostPath:
+          path: /var/lib/docker
+          type: DirectoryOrCreate
+      # Add k3s containerd socket
+      - name: k3s-containerd-sock
+        hostPath:
+          path: /run/k3s/containerd/containerd.sock
+          type: Socket
