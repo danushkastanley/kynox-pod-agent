@@ -2,7 +2,7 @@
 
 A high-performance Runtime Application Self-Protection (RASP) agent for Kubernetes environments, leveraging eBPF technology for real-time system call monitoring and security event detection. This agent provides comprehensive visibility into container activities and security-relevant system calls with minimal performance overhead.
 
-## 🔧 Features
+## Features
 
 ### Process Monitoring
 - **Process Execution**: Tracks `execve` and `execveat` system calls with full command-line arguments
@@ -32,7 +32,7 @@ A high-performance Runtime Application Self-Protection (RASP) agent for Kubernet
 - **Kubernetes Metadata**: Enriches events with pod names, namespaces, and container names
 - **Multi-Runtime Support**: Works with Docker, containerd, and other container runtimes
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 pod-agent/
@@ -79,7 +79,7 @@ pod-agent/
 - **Event Structures**: Shared data structures between kernel and userspace
 - **Rate Limiting**: Prevents event flooding with per-PID rate limiting
 
-## 🚀 Prerequisites
+## Prerequisites
 
 ### System Requirements
 - **Linux Kernel**: ≥ 5.8 with eBPF support and kernel headers
@@ -115,7 +115,7 @@ sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
 sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-14 100
 ```
 
-## 🔨 Building
+## Building
 
 ### Using Docker (Recommended)
 
@@ -145,7 +145,7 @@ cargo build --release
 # The binary will be at target/release/agent
 ```
 
-## 📦 Deployment
+## Deployment
 
 ### Kubernetes DaemonSet Deployment
 
@@ -181,7 +181,7 @@ Volume mounts required:
 - `/proc`: Process information
 - `/sys/fs/bpf`: BPF filesystem
 
-## ⚙️ Configuration
+## Configuration
 
 Configure the agent via environment variables:
 
@@ -208,7 +208,7 @@ env:
         fieldPath: spec.nodeName
 ```
 
-## 📊 Monitored Events
+## Monitored Events
 
 ### Event Types and Classifications
 
@@ -252,7 +252,7 @@ pub struct EventOutput {
 }
 ```
 
-## 🔗 Communication Protocol
+## Communication Protocol
 
 ### gRPC Service Interface
 
@@ -274,7 +274,7 @@ service TelemetryService {
 4. **Event Streaming**: Continuous event stream with acknowledgments
 5. **Reconnection**: Automatic reconnection on connection loss
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -318,7 +318,7 @@ env:
     value: "debug"
 ```
 
-## 🧪 Testing
+## Testing
 
 ### Unit Tests
 ```bash
@@ -341,7 +341,7 @@ kubectl logs -f -l app=pod-agent
 kubectl exec <test-pod> -- /bin/sh -c "echo 'test' > /tmp/test.txt"
 ```
 
-## 📈 Performance Considerations
+## Performance Considerations
 
 ### Resource Usage
 - **CPU**: ~50-100m per node
@@ -358,7 +358,7 @@ kubectl exec <test-pod> -- /bin/sh -c "echo 'test' > /tmp/test.txt"
 - Minimal kernel overhead with tracepoint attachment
 - Efficient filtering in kernel space
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -372,7 +372,7 @@ kubectl exec <test-pod> -- /bin/sh -c "echo 'test' > /tmp/test.txt"
 - Update documentation for API changes
 - Ensure eBPF programs are properly formatted
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 

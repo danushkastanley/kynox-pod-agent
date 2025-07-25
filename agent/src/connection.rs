@@ -101,7 +101,7 @@ impl ConnectionManager {
                             let session_id = response.session_id;
                             is_healthy.store(true, Ordering::SeqCst);
                             
-                            info!("🔗 Successfully connected to controller (session: {})", session_id);
+                            info!("Successfully connected to controller (session: {})", session_id);
                             debug!("Connection details:");
                             debug!("  Agent ID: {}", *agent_id);
                             debug!("  Node: {}", *node_name);
@@ -110,12 +110,12 @@ impl ConnectionManager {
                             Ok((true, Some(session_id)))
                         } else {
                             let err_msg = format!("Connection rejected by controller: {}", response.error_message);
-                            error!("❌ {}", err_msg);
+                            error!("{}", err_msg);
                             Ok((false, None))
                         }
                     }
                     Err(status) => {
-                        error!("❌ Connection attempt failed:");
+                        error!("Connection attempt failed:");
                         error!("   Error Code: {}", status.code());
                         error!("   Message: {}", status.message());
                         error!("   Details: {:?}", status.details());
@@ -160,27 +160,27 @@ impl ConnectionManager {
                         let status = response.into_inner();
                         match status.status {
                             0 => { // CONNECTED
-                                debug!("💓 Heartbeat acknowledged");
+                                debug!("Heartbeat acknowledged");
                                 self.is_healthy.store(true, Ordering::SeqCst);
                             }
                             2 => { // ERROR
                                 self.is_healthy.store(false, Ordering::SeqCst);
                                 let err_msg = format!("Heartbeat error: {}", status.error_message);
-                                error!("❌ {}", err_msg);
+                                error!("{}", err_msg);
                                 error!("   Session ID: {}", session_id);
                                 error!("   Agent ID: {}", self.agent_id);
                                 return Err(ConnectionError::Session(err_msg));
                             }
                             1 => { // DISCONNECTED
                                 self.is_healthy.store(false, Ordering::SeqCst);
-                                warn!("⚠️ Controller reports disconnected state");
+                                warn!("Controller reports disconnected state");
                                 warn!("   Session ID: {}", session_id);
                                 warn!("   Agent ID: {}", self.agent_id);
                                 return Err(ConnectionError::Session("Disconnected by controller".to_string()));
                             }
                             _ => {
                                 self.is_healthy.store(false, Ordering::SeqCst);
-                                error!("❌ Invalid status received in heartbeat response");
+                                error!("Invalid status received in heartbeat response");
                                 error!("   Status: {}", status.status);
                                 error!("   Session ID: {}", session_id);
                                 return Err(ConnectionError::Session("Invalid status".to_string()));
@@ -189,7 +189,7 @@ impl ConnectionManager {
                     }
                     Err(e) => {
                         self.is_healthy.store(false, Ordering::SeqCst);
-                        error!("❌ Failed to send heartbeat:");
+                        error!("Failed to send heartbeat:");
                         error!("   Error: {}", e);
                         error!("   Code: {}", e.code());
                         error!("   Message: {}", e.message());
@@ -200,7 +200,7 @@ impl ConnectionManager {
                 }
             } else {
                 self.is_healthy.store(false, Ordering::SeqCst);
-                error!("❌ No session ID available for heartbeat");
+                error!("No session ID available for heartbeat");
                 error!("   Agent ID: {}", self.agent_id);
                 return Err(ConnectionError::Session("No active session".to_string()));
             }
