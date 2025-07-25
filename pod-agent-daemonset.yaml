@@ -28,9 +28,9 @@ spec:
         - name: CONTROLLER_ENDPOINT
           value: "rasp-controller.default.svc:50051"  # Removed http:// prefix for gRPC
         - name: RUST_LOG
-          value: "debug"  # Changed from info to debug for troubleshooting
+          value: "info"   # Set to info level to reduce log noise
         - name: DEBUG
-          value: "debug"  # Set to "debug" for verbose logging
+          value: "info"   # Set to info level to reduce log noise
         - name: NODE_NAME
           valueFrom:
             fieldRef:
