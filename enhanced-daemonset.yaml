@@ -1,0 +1,205 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pod-agent-enhanced
+  namespace: security-monitoring
+  labels:
+    app: pod-agent-enhanced
+spec:
+  selector:
+    matchLabels:
+      app: pod-agent-enhanced
+  template:
+    metadata:
+      labels:
+        app: pod-agent-enhanced
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: pod-agent-enhanced
+      tolerations:
+      # Allow scheduling on master nodes for control plane monitoring
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      # Tolerate all taints to run on every node
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      nodeSelector:
+        # Run on all nodes including control plane
+        kubernetes.io/os: linux
+      containers:
+      - name: pod-agent
+        image: pod-agent:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - SYS_ADMIN     # eBPF program loading
+            - SYS_PTRACE    # Process tracing
+            - NET_ADMIN     # Network monitoring
+            - BPF           # eBPF operations
+            - AUDIT_WRITE   # Audit logging
+            - AUDIT_CONTROL # Audit control
+            - SYS_RESOURCE  # Resource management
+            - DAC_OVERRIDE  # File access override
+        env:
+        - name: CONTROLLER_ENDPOINT
+          value: "rasp-controller.security-monitoring.svc:50051"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: RUST_LOG
+          value: "info"
+        - name: MONITOR_MODE
+          value: "cluster-wide"  # Enable cluster-wide monitoring
+        - name: MONITOR_CONTROL_PLANE
+          value: "true"          # Monitor control plane processes
+        - name: MONITOR_HOST_PROCESSES
+          value: "true"          # Monitor host processes
+        volumeMounts:
+        # eBPF filesystem access
+        - name: debugfs
+          mountPath: /sys/kernel/debug
+          readOnly: false
+        - name: bpffs
+          mountPath: /sys/fs/bpf
+          readOnly: false
+        # Process information
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        # Container runtime access for ALL containers on the node
+        - name: docker-containers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: containerd-containers
+          mountPath: /run/containerd/containers
+          readOnly: true
+        - name: containerd-state
+          mountPath: /var/lib/containerd
+          readOnly: true
+        # cgroups for container context
+        - name: cgroup
+          mountPath: /sys/fs/cgroup
+          readOnly: true
+        # Kubernetes manifests for control plane detection
+        - name: kubernetes-manifests
+          mountPath: /etc/kubernetes/manifests
+          readOnly: true
+        # systemd for service detection
+        - name: systemd
+          mountPath: /run/systemd
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: debugfs
+        hostPath:
+          path: /sys/kernel/debug
+          type: Directory
+      - name: bpffs
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate
+      - name: proc
+        hostPath:
+          path: /proc
+          type: Directory
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+      - name: docker-containers
+        hostPath:
+          path: /var/lib/docker/containers
+          type: DirectoryOrCreate
+      - name: containerd-containers
+        hostPath:
+          path: /run/containerd/containers
+          type: DirectoryOrCreate
+      - name: containerd-state
+        hostPath:
+          path: /var/lib/containerd
+          type: DirectoryOrCreate
+      - name: cgroup
+        hostPath:
+          path: /sys/fs/cgroup
+          type: Directory
+      - name: kubernetes-manifests
+        hostPath:
+          path: /etc/kubernetes/manifests
+          type: DirectoryOrCreate
+      - name: systemd
+        hostPath:
+          path: /run/systemd
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-agent-enhanced
+  namespace: security-monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-agent-enhanced
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "daemonsets", "replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+# For accessing metrics and monitoring
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-agent-enhanced
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-agent-enhanced
+subjects:
+- kind: ServiceAccount
+  name: pod-agent-enhanced
+  namespace: security-monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-monitoring
+  labels:
+    name: security-monitoring 
