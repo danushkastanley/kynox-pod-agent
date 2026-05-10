@@ -4,11 +4,31 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 use log::debug;
 
+use crate::cache::get_cache;
+
 /// JSON parsing for container configs
 extern crate serde_json;
 
-/// Get container context for a given PID
+/// Get container context for a given PID (with caching)
 pub fn get_container_context(pid: u32) -> Result<Option<HashMap<String, String>>> {
+    // Check cache first
+    if let Some(cached) = get_cache().get(pid) {
+        return Ok(cached);
+    }
+
+    // Cache miss - perform lookup
+    let result = get_container_context_uncached(pid);
+
+    // Cache the result (including None for non-container processes)
+    if let Ok(ref context) = result {
+        get_cache().insert(pid, context.clone());
+    }
+
+    result
+}
+
+/// Get container context without caching (internal implementation)
+fn get_container_context_uncached(pid: u32) -> Result<Option<HashMap<String, String>>> {
     debug!("Looking up container context for PID: {}", pid);
     
     // Read cgroup info

@@ -3,7 +3,7 @@ use libbpf_rs::RingBufferBuilder;
 use log::{error, info, warn, debug};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bpf::{ExecMonitorSkel, ExecMonitorSkelBuilder};
@@ -140,9 +140,18 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
         }
         EVENT_TYPE_CONNECT => {
             let net_info = unsafe { raw.data.net_info };
-            let addr = Ipv4Addr::from(u32::from_be(net_info.daddr));
-            event.daddr = Some(addr.to_string());
             event.dport = Some(net_info.dport);
+
+            // Handle IPv4 vs IPv6 based on address family
+            if net_info.family == libc::AF_INET6 as u16 {
+                // IPv6 address
+                let addr = Ipv6Addr::from(net_info.daddr6);
+                event.daddr = Some(addr.to_string());
+            } else {
+                // IPv4 address (default)
+                let addr = Ipv4Addr::from(u32::from_be(net_info.daddr));
+                event.daddr = Some(addr.to_string());
+            }
         }
         EVENT_TYPE_PTRACE => {
             let info = unsafe { raw.data.ptrace_info };
@@ -211,21 +220,30 @@ pub fn parse_bpf_event(data: &[u8]) -> Option<EventOutput> {
             event.socket_domain = Some(match info.domain {
                 libc::AF_INET => "AF_INET".to_string(),
                 libc::AF_INET6 => "AF_INET6".to_string(),
+                libc::AF_UNIX => "AF_UNIX".to_string(),
+                libc::AF_NETLINK => "AF_NETLINK".to_string(),
                 _ => format!("unknown({})", info.domain),
             });
             event.socket_type = Some(match info.type_ {
                 libc::SOCK_STREAM => "SOCK_STREAM".to_string(),
                 libc::SOCK_DGRAM => "SOCK_DGRAM".to_string(),
                 libc::SOCK_RAW => "SOCK_RAW".to_string(),
+                libc::SOCK_SEQPACKET => "SOCK_SEQPACKET".to_string(),
                 _ => format!("unknown({})", info.type_),
             });
             event.socket_protocol = Some(info.protocol);
             event.socket_fd = Some(info.sock_fd);
             if raw.event_type == EVENT_TYPE_BIND {
-                if info.addr != 0 {
+                event.socket_port = Some(info.port);
+                // Handle IPv4 vs IPv6 based on address family
+                if info.family == libc::AF_INET6 as u16 {
+                    // IPv6 address
+                    let addr = Ipv6Addr::from(info.addr6);
+                    event.socket_addr = Some(addr.to_string());
+                } else if info.addr != 0 || info.family == libc::AF_INET as u16 {
+                    // IPv4 address
                     let addr = Ipv4Addr::from(u32::from_be(info.addr));
                     event.socket_addr = Some(addr.to_string());
-                    event.socket_port = Some(info.port);
                 }
             }
         }

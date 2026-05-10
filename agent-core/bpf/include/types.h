@@ -14,8 +14,10 @@ struct exec_monitor_event {
     union {
         char filename[FILENAME_LEN];
         struct net_info {
-            __u32 daddr;
-            __u16 dport;
+            __u32 daddr;        // IPv4 address (network byte order)
+            __u16 dport;        // Destination port (host byte order)
+            __u16 family;       // Address family: AF_INET or AF_INET6
+            __u8 daddr6[16];    // IPv6 address (128 bits)
         } net_info;
         struct ptrace_info {
             long request;
@@ -55,12 +57,14 @@ struct exec_monitor_event {
             __u32 flags;
         } seccomp_info;
         struct sock_info {
-            __s32 domain;
-            __s32 type;
-            __s32 protocol;
-            __u32 sock_fd;
-            __u32 addr;
-            __u16 port;
+            __s32 domain;       // Socket domain (AF_INET, AF_INET6, etc.)
+            __s32 type;         // Socket type (SOCK_STREAM, SOCK_DGRAM, etc.)
+            __s32 protocol;     // Protocol (0 for default)
+            __u32 sock_fd;      // Socket file descriptor
+            __u32 addr;         // IPv4 address (network byte order)
+            __u16 port;         // Port (host byte order)
+            __u16 family;       // Address family: AF_INET or AF_INET6
+            __u8 addr6[16];     // IPv6 address (128 bits)
         } sock_info;
         struct chmod_info {
             char path[FILENAME_LEN];

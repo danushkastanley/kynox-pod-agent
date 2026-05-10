@@ -31,8 +31,10 @@ pub union EventData {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct NetInfo {
-    pub daddr: u32,
-    pub dport: u16,
+    pub daddr: u32,         // IPv4 address (network byte order)
+    pub dport: u16,         // Destination port (host byte order)
+    pub family: u16,        // Address family: AF_INET or AF_INET6
+    pub daddr6: [u8; 16],   // IPv6 address (128 bits)
 }
 
 #[repr(C)]
@@ -99,12 +101,14 @@ pub struct SeccompInfo {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SockInfo {
-    pub domain: i32,
-    pub type_: i32,
-    pub protocol: i32,
-    pub sock_fd: u32,
-    pub addr: u32,
-    pub port: u16,
+    pub domain: i32,        // Socket domain (AF_INET, AF_INET6, etc.)
+    pub type_: i32,         // Socket type (SOCK_STREAM, SOCK_DGRAM, etc.)
+    pub protocol: i32,      // Protocol (0 for default)
+    pub sock_fd: u32,       // Socket file descriptor
+    pub addr: u32,          // IPv4 address (network byte order)
+    pub port: u16,          // Port (host byte order)
+    pub family: u16,        // Address family: AF_INET or AF_INET6
+    pub addr6: [u8; 16],    // IPv6 address (128 bits)
 }
 
 #[repr(C)]

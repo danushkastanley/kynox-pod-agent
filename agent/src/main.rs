@@ -53,8 +53,10 @@ const RECONNECT_DELAY_MS: u64 = 1000;
 const EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(500); 
 const MAX_RETRIES: usize = 3;             
 
+mod cache;
 mod utils;
 use utils::get_container_context;
+use cache::get_cache;
 
 #[derive(Debug, Clone)]
 struct AgentConfig {
@@ -134,6 +136,27 @@ async fn connect_and_run(uri: String) -> Result<(), BoxError> {
             tokio::spawn(async move {
                 if let Err(e) = heartbeat_manager.start_heartbeat().await {
                     error!("Heartbeat task failed: {}", e);
+                }
+            });
+
+            // Start container cache cleanup task (runs every 60 seconds)
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let cache = get_cache();
+                    cache.cleanup_expired();
+
+                    // Log cache stats periodically
+                    let stats = cache.stats();
+                    debug!(
+                        "Container cache stats - size: {}, hits: {}, misses: {}, hit_rate: {:.1}%, evictions: {}",
+                        cache.len(),
+                        stats.hits,
+                        stats.misses,
+                        stats.hit_rate() * 100.0,
+                        stats.evictions
+                    );
                 }
             });
             
