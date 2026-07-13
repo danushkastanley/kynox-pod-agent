@@ -1,0 +1,28 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+description = "Node agent for eBPF-based Kubernetes runtime security monitoring"
+license = "MIT"
+repository = "https://github.com/danushkastanley/pod-agent"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+anyhow = "1.0"
+async-stream = "0.3"
+env_logger = "0.10"
+log = "0.4"
+serde_json = "1.0"  # For parsing container config
+tokio = { version = "1.0", features = ["full"] }
+tonic = { version = "0.13.1", features = ["tls-ring"] }
+prost = "0.13"
+prost-types = "0.13"
+tokio-stream = "0.1"
+uuid = { version = "1.4", features = ["v4"] }
+chrono = "0.4.41"
+
+[build-dependencies]
+tonic-build = "0.13.1"

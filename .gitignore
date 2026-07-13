@@ -1,0 +1,102 @@
+# Rust/Cargo build artifacts
+/target/
+**/target/
+debug/
+release/
+# Cargo.lock is committed because this workspace ships an application.
+
+# Rust backup files
+**/*.rs.bk
+**/*.rs.orig
+
+# MSVC Windows builds
+*.pdb
+
+# eBPF specific files
+*.o
+*.ll
+*.oci.tar
+*.bpf.o
+*.skel.h
+vmlinux.h.bak
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.envrc
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment and config files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.pid
+
+# Build artifacts
+bin/
+dist/
+build/
+out/
+
+# Coverage and profiling
+*.profraw
+*.profdata
+lcov.info
+coverage/
+
+# Docker build context
+.dockerignore.bak
+
+# Kubernetes temporary files
+*.yaml.bak
+*.yml.bak
+
+# Archives
+*.tar.gz
+*.zip
+*.7z
+
+# Test artifacts
+test-results/
+test-output/
+
+# Local development files
+local-*
+*.local
+dev-*
+
+# Security/secrets
+*.key
+*.pem
+*.crt
+*.p12
+*.jks
+
+# Documentation build
+docs/_build/
+docs/book/
+
+# Benchmark results
+bench-results/
+criterion/
+
+# Flamegraph outputs
+flamegraph.svg
+perf.data*

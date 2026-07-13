@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pod-agent-ds
+  labels:
+    app: pod-agent
+spec:
+  selector:
+    matchLabels:
+      app: pod-agent
+  template:
+    metadata:
+      labels:
+        app: pod-agent
+    spec:
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      hostNetwork: false
+      hostPID: true # Required to observe host process IDs.
+      containers:
+      - name: pod-agent
+        # Replace with a published, immutable release tag or digest.
+        image: ghcr.io/danushkastanley/pod-agent:0.1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CONTROLLER_ENDPOINT
+          value: "rasp-controller.default.svc:50051"
+        - name: MTLS_ENABLED
+          value: "true"
+        - name: MTLS_CA_CERT_FILE
+          value: /etc/rasp/tls/ca/ca.crt
+        - name: MTLS_CLIENT_CERT_FILE
+          value: /etc/rasp/tls/client/tls.crt
+        - name: MTLS_CLIENT_KEY_FILE
+          value: /etc/rasp/tls/client/tls.key
+        - name: MTLS_SERVER_NAME
+          value: "rasp-controller.default.svc"
+        - name: RUST_LOG
+          value: "info"   # Set to info level to reduce log noise
+        - name: DEBUG
+          value: "info"   # Set to info level to reduce log noise
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # Container ID will be detected at runtime by the agent
+        # Note: status.containerID is not a supported fieldPath in Kubernetes
+        securityContext:
+          privileged: true              # Needed for eBPF kernel access
+          capabilities:
+            add: ["SYS_ADMIN", "NET_ADMIN"]  # Added NET_ADMIN for network access
+        volumeMounts:                 # Mount necessary host paths
+        - name: sys-kernel-debug
+          mountPath: /sys/kernel/debug
+          readOnly: true
+        - name: mtls-ca
+          mountPath: /etc/rasp/tls/ca
+          readOnly: true
+        - name: agent-tls
+          mountPath: /etc/rasp/tls/client
+          readOnly: true
+        - name: proc-fs
+          mountPath: /proc
+          readOnly: true
+        - name: sys-fs-bpf
+          mountPath: /sys/fs/bpf
+        - name: kernel-modules
+          mountPath: /lib/modules
+          readOnly: true
+        # Add containerd runtime access for container identification
+        - name: containerd-run
+          mountPath: /run/containerd
+          readOnly: true
+        - name: containerd-data
+          mountPath: /var/lib/containerd
+          readOnly: true
+        # Add docker runtime access as fallback
+        - name: docker-data
+          mountPath: /var/lib/docker
+          readOnly: true
+        # Add k3s containerd socket
+        - name: k3s-containerd-sock
+          mountPath: /run/k3s/containerd/containerd.sock
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:                        # Define the hostPath volumes
+      - name: sys-kernel-debug
+        hostPath:
+          path: /sys/kernel/debug
+          type: Directory
+      - name: mtls-ca
+        secret:
+          secretName: rasp-mtls-ca
+          items:
+          - key: ca.crt
+            path: ca.crt
+      - name: agent-tls
+        secret:
+          secretName: rasp-agent-tls
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+      - name: proc-fs
+        hostPath:
+          path: /proc
+          type: Directory
+      - name: sys-fs-bpf
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate # Needed if agent mounts BPF maps here
+      - name: kernel-modules
+        hostPath:
+          path: /lib/modules
+          type: Directory
+      # Add containerd runtime access for container identification
+      - name: containerd-run
+        hostPath:
+          path: /run/containerd
+          type: DirectoryOrCreate
+      - name: containerd-data
+        hostPath:
+          path: /var/lib/containerd
+          type: DirectoryOrCreate
+      # Add docker runtime access as fallback
+      - name: docker-data
+        hostPath:
+          path: /var/lib/docker
+          type: DirectoryOrCreate
+      # Add k3s containerd socket
+      - name: k3s-containerd-sock
+        hostPath:
+          path: /run/k3s/containerd/containerd.sock
+          type: Socket
