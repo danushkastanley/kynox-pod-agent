@@ -12,7 +12,6 @@ repository = "https://github.com/danushkastanley/pod-agent"
 [dependencies]
 agent-core = { path = "../agent-core" }
 anyhow = "1.0"
-async-stream = "0.3"
 env_logger = "0.10"
 log = "0.4"
 serde_json = "1.0"  # For parsing container config

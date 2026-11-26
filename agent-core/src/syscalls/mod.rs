@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::RingBufferBuilder;
 use log::{debug, error, info, warn};
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,8 +33,20 @@ impl SyscallMonitor {
         // A monitor lives until process shutdown, so process-lifetime storage is
         // explicit and bounded to one allocation per monitor.
         let object = Box::leak(Box::new(MaybeUninit::uninit()));
-        #[cfg_attr(target_arch = "x86_64", allow(unused_mut))]
         let mut open_skel = skel_builder.open(object)?;
+
+        // Tell the BPF programs which process is the agent so they drop its own
+        // syscalls (see is_self() in event_handling.h).
+        let pidns = std::fs::metadata("/proc/self/ns/pid")
+            .context("read the agent's PID namespace from /proc/self/ns/pid")?;
+        let rodata = open_skel
+            .maps
+            .rodata_data
+            .as_deref_mut()
+            .ok_or_else(|| anyhow!("BPF object has no read-only data section"))?;
+        rodata.self_pidns_dev = pidns.dev();
+        rodata.self_pidns_ino = pidns.ino();
+        rodata.self_tgid = std::process::id();
 
         // open(2) and chmod(2) are legacy x86_64 syscalls. Kernels using the generic
         // syscall table (arm64) have no tracepoints for them; the same activity is
