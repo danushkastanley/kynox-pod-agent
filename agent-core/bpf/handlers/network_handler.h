@@ -30,9 +30,11 @@ int handle_connect(struct trace_event_raw_sys_enter *ctx) {
 
     init_event(e, EVENT_TYPE_CONNECT);
 
-    // First read the address family
-    if (bpf_probe_read(&sa_gen, sizeof(sa_gen), (void *)ctx->args[1]) != 0) {
-        submit_event(e);
+    // Only IP connections carry a destination address and port. Unix-domain and other
+    // families were previously reported as IPv4 0.0.0.0:0 and misclassified as external.
+    if (bpf_probe_read(&sa_gen, sizeof(sa_gen), (void *)ctx->args[1]) != 0 ||
+        (sa_gen.sa_family != AF_INET && sa_gen.sa_family != AF_INET6)) {
+        bpf_ringbuf_discard(e, 0);
         return 0;
     }
 

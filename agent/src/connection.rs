@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
@@ -6,7 +5,6 @@ use tokio::time;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
-use uuid::Uuid;
 
 use crate::telemetry::{
     telemetry_service_client::TelemetryServiceClient, ConnectRequest, Heartbeat,
@@ -15,6 +13,8 @@ use crate::telemetry::{
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(300); // 5 minutes
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+/// Deadline for unary RPCs. The event stream is long-lived and has no deadline.
+const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum ConnectionError {
@@ -42,16 +42,19 @@ pub struct ConnectionManager {
     node_name: String,
     pod_name: String,
     session_id: Option<String>,
-    is_healthy: std::sync::Arc<AtomicBool>,
 }
 
 impl ConnectionManager {
+    /// `agent_id` must stay the same for the life of the process, and `previous_session_id`
+    /// is the last session the controller issued to it, so a reconnect resumes the same
+    /// registration instead of creating a new one.
     pub fn new(
         client: TelemetryServiceClient<Channel>,
+        agent_id: String,
         node_name: String,
         pod_name: String,
+        previous_session_id: Option<String>,
     ) -> Self {
-        let agent_id = Uuid::new_v4().to_string();
         info!("Initialising connection manager");
 
         Self {
@@ -59,8 +62,7 @@ impl ConnectionManager {
             agent_id,
             node_name,
             pod_name,
-            session_id: None,
-            is_healthy: std::sync::Arc::new(AtomicBool::new(false)),
+            session_id: previous_session_id,
         }
     }
 
@@ -76,31 +78,39 @@ impl ConnectionManager {
             });
             add_reconnect_metadata(&mut request, &self.agent_id, self.session_id.as_deref())?;
 
-            match self.client.connect_agent(request).await {
+            let result = match time::timeout(RPC_TIMEOUT, self.client.connect_agent(request)).await
+            {
+                Ok(result) => result,
+                Err(_) => Err(Status::deadline_exceeded("ConnectAgent timed out")),
+            };
+
+            match result {
                 Ok(response) => {
                     let response = response.into_inner();
                     if !response.success {
-                        self.is_healthy.store(false, Ordering::SeqCst);
                         error!("Connection rejected by controller");
                         return Ok(false);
                     }
 
                     self.session_id = Some(response.session_id);
-                    self.is_healthy.store(true, Ordering::SeqCst);
                     info!("Successfully connected to controller");
                     return Ok(true);
                 }
-                Err(status) if status.code() == tonic::Code::Unavailable => {
-                    self.is_healthy.store(false, Ordering::SeqCst);
+                Err(status)
+                    if matches!(
+                        status.code(),
+                        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                    ) =>
+                {
                     warn!(
-                        "Controller unavailable; retrying connection in {:?}",
+                        "Controller unavailable ({}); retrying connection in {:?}",
+                        status.code(),
                         retry_delay
                     );
                     time::sleep(retry_delay).await;
                     retry_delay = std::cmp::min(retry_delay * 2, MAX_RECONNECT_DELAY);
                 }
                 Err(status) => {
-                    self.is_healthy.store(false, Ordering::SeqCst);
                     error!("Connection rejected with gRPC status {}", status.code());
                     return Err(ConnectionError::Grpc(Box::new(status)));
                 }
@@ -108,6 +118,7 @@ impl ConnectionManager {
         }
     }
 
+    /// Sends heartbeats until one fails. Only returns on failure.
     pub async fn start_heartbeat(&mut self) -> Result<(), ConnectionError> {
         let mut interval = time::interval(HEARTBEAT_INTERVAL);
 
@@ -116,59 +127,50 @@ impl ConnectionManager {
         loop {
             interval.tick().await;
 
-            if let Some(session_id) = &self.session_id {
-                let request = Request::new(Heartbeat {
-                    agent_id: self.agent_id.clone(),
-                    session_id: session_id.clone(),
-                });
-
-                debug!("Sending heartbeat");
-
-                match self.client.send_heartbeat(request).await {
-                    Ok(response) => {
-                        let status = response.into_inner();
-                        match status.status {
-                            0 => {
-                                // CONNECTED
-                                debug!("Heartbeat acknowledged");
-                                self.is_healthy.store(true, Ordering::SeqCst);
-                            }
-                            2 => {
-                                // ERROR
-                                self.is_healthy.store(false, Ordering::SeqCst);
-                                let err_msg = format!("Heartbeat error: {}", status.error_message);
-                                error!("{}", err_msg);
-                                return Err(ConnectionError::Session(err_msg));
-                            }
-                            1 => {
-                                // DISCONNECTED
-                                self.is_healthy.store(false, Ordering::SeqCst);
-                                warn!("Controller reports disconnected state");
-                                return Err(ConnectionError::Session(
-                                    "Disconnected by controller".to_string(),
-                                ));
-                            }
-                            _ => {
-                                self.is_healthy.store(false, Ordering::SeqCst);
-                                error!("Invalid status received in heartbeat response");
-                                error!("   Status: {}", status.status);
-                                return Err(ConnectionError::Session("Invalid status".to_string()));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.is_healthy.store(false, Ordering::SeqCst);
-                        error!("Failed to send heartbeat:");
-                        error!("   Error: {}", e);
-                        error!("   Code: {}", e.code());
-                        error!("   Message: {}", e.message());
-                        return Err(ConnectionError::Grpc(Box::new(e)));
-                    }
-                }
-            } else {
-                self.is_healthy.store(false, Ordering::SeqCst);
+            let Some(session_id) = &self.session_id else {
                 error!("No session ID available for heartbeat");
                 return Err(ConnectionError::Session("No active session".to_string()));
+            };
+
+            let request = Request::new(Heartbeat {
+                agent_id: self.agent_id.clone(),
+                session_id: session_id.clone(),
+            });
+
+            debug!("Sending heartbeat");
+
+            let result = match time::timeout(RPC_TIMEOUT, self.client.send_heartbeat(request)).await
+            {
+                Ok(result) => result,
+                Err(_) => Err(Status::deadline_exceeded("SendHeartbeat timed out")),
+            };
+            let status = match result {
+                Ok(response) => response.into_inner(),
+                Err(e) => {
+                    error!("Failed to send heartbeat: {} ({})", e.message(), e.code());
+                    return Err(ConnectionError::Grpc(Box::new(e)));
+                }
+            };
+
+            match status.status {
+                0 => debug!("Heartbeat acknowledged"), // CONNECTED
+                1 => {
+                    // DISCONNECTED
+                    warn!("Controller reports disconnected state");
+                    return Err(ConnectionError::Session(
+                        "Disconnected by controller".to_string(),
+                    ));
+                }
+                2 => {
+                    // ERROR
+                    let err_msg = format!("Heartbeat error: {}", status.error_message);
+                    error!("{}", err_msg);
+                    return Err(ConnectionError::Session(err_msg));
+                }
+                other => {
+                    error!("Invalid status received in heartbeat response: {}", other);
+                    return Err(ConnectionError::Session("Invalid status".to_string()));
+                }
             }
         }
     }
@@ -187,10 +189,6 @@ impl ConnectionManager {
 
     pub fn get_pod_name(&self) -> &str {
         &self.pod_name
-    }
-
-    pub fn is_connected(&self) -> bool {
-        self.session_id.is_some() && self.is_healthy.load(Ordering::SeqCst)
     }
 }
 

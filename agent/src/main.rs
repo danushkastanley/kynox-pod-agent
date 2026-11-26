@@ -5,20 +5,27 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_stream::stream;
+use agent_core::{EventOutput, SyscallMonitor};
 use env_logger::{Builder, Env};
 use log::{debug, error, info, warn};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex};
-use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Endpoint;
+use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
+use uuid::Uuid;
 
+mod cache;
 mod connection;
-use connection::ConnectionManager;
+mod event_conversion;
+mod mtls;
+mod utils;
 
-use agent_core::SyscallMonitor;
+use cache::get_cache;
+use connection::ConnectionManager;
+use event_conversion::convert_eventoutput_to_securityevent;
+use mtls::{controller_uri, load_client_tls_config, AgentConfig};
 
 // Generated tonic client code returns tonic::Status (large) in Result; not ours to reshape.
 #[allow(clippy::result_large_err)]
@@ -27,25 +34,99 @@ pub mod telemetry {
 }
 
 use telemetry::telemetry_service_client::TelemetryServiceClient;
+use telemetry::SecurityEvent;
 
 type BoxError = Box<dyn Error + Send + Sync + 'static>;
+/// Events collected from the kernel. Shared across connections so that events buffered
+/// while the controller is unreachable are sent after the agent reconnects.
+type EventReceiver = Arc<Mutex<mpsc::Receiver<EventOutput>>>;
 
 const EVENT_CHANNEL_SIZE: usize = 50000;
+const STREAM_BUFFER_SIZE: usize = 1024;
 const BPF_POLL_TIMEOUT_MS: u32 = 500;
-const RECONNECT_DELAY_MS: u64 = 1000;
-const MAX_RETRIES: usize = 3;
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-mod cache;
-mod event_conversion;
-mod mtls;
-mod utils;
-use cache::get_cache;
-use event_conversion::convert_eventoutput_to_securityevent;
-use mtls::{controller_uri, load_client_tls_config, AgentConfig};
+/// Identity that must survive reconnects so the controller resumes the same registration.
+struct AgentSession {
+    agent_id: String,
+    session_id: Option<String>,
+}
 
-async fn run_event_sender(config: AgentConfig) -> Result<(), BoxError> {
+/// Loads and attaches the eBPF programs once for the life of the process and polls the
+/// ring buffer on a dedicated thread (polling blocks, so it must not run on the async runtime).
+fn start_monitor(tx: mpsc::Sender<EventOutput>) -> Result<(), BoxError> {
+    let mut monitor = SyscallMonitor::new()?;
+    monitor.attach()?;
+
+    let dropped_events = AtomicU64::new(0);
+    let channel_closed = AtomicBool::new(false);
+    monitor.setup_ring_buffer(move |data| {
+        if let Some(event_output) = agent_core::syscalls::parse_bpf_event(data) {
+            match tx.try_send(event_output) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    let dropped = dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+                    if dropped == 1 || dropped.is_multiple_of(1_000) {
+                        warn!(
+                            "Event channel full; dropping security event (total dropped: {})",
+                            dropped
+                        );
+                    }
+                }
+                Err(TrySendError::Closed(_)) => {
+                    if !channel_closed.swap(true, Ordering::Relaxed) {
+                        error!("Event channel closed; dropping subsequent security events");
+                    }
+                }
+            }
+        }
+        0 // Continue processing events
+    })?;
+
+    std::thread::Builder::new()
+        .name("bpf-poll".to_string())
+        .spawn(move || loop {
+            if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
+                // Without polling the agent silently stops monitoring. Exit so the
+                // orchestrator restarts it and the failure is visible.
+                error!("Event collection failed; exiting: {}", e);
+                std::process::exit(1);
+            }
+        })?;
+
+    Ok(())
+}
+
+fn spawn_cache_cleanup() {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CACHE_CLEANUP_INTERVAL);
+        loop {
+            interval.tick().await;
+            let cache = get_cache();
+            cache.cleanup_expired();
+
+            let stats = cache.stats();
+            debug!(
+                "Container cache stats - size: {}, hits: {}, misses: {}, hit_rate: {:.1}%, evictions: {}",
+                cache.len(),
+                stats.hits,
+                stats.misses,
+                stats.hit_rate() * 100.0,
+                stats.evictions
+            );
+        }
+    });
+}
+
+async fn run_event_sender(config: AgentConfig, events: EventReceiver) {
+    let mut session = AgentSession {
+        agent_id: Uuid::new_v4().to_string(),
+        session_id: None,
+    };
+
     loop {
-        let config = config.clone();
         if config.mtls_enabled {
             info!(
                 "Attempting mTLS connection to controller at {}",
@@ -59,244 +140,120 @@ async fn run_event_sender(config: AgentConfig) -> Result<(), BoxError> {
             );
         }
 
-        match connect_and_run(config).await {
-            Ok(_) => {
-                warn!(
-                    "Connection closed, attempting to reconnect in {} ms...",
-                    RECONNECT_DELAY_MS
-                );
-                tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+        if let Err(e) = connect_and_run(&config, &mut session, Arc::clone(&events)).await {
+            error!("Connection error: {}", e);
+        }
+        warn!("Reconnecting to controller in {:?}...", RECONNECT_DELAY);
+        tokio::time::sleep(RECONNECT_DELAY).await;
+    }
+}
+
+async fn connect_channel(config: &AgentConfig) -> Result<Channel, BoxError> {
+    let mut endpoint = Endpoint::from_shared(controller_uri(config))?;
+    if config.mtls_enabled {
+        endpoint = endpoint.tls_config(load_client_tls_config(config)?)?;
+    }
+
+    // connect_timeout bounds connection setup only. A request-level timeout would also
+    // cancel the long-lived event stream.
+    let channel = endpoint
+        .connect_timeout(CONNECT_TIMEOUT)
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .tcp_nodelay(true)
+        .connect()
+        .await?;
+    Ok(channel)
+}
+
+/// Runs one controller connection until the event stream or the heartbeat fails.
+async fn connect_and_run(
+    config: &AgentConfig,
+    session: &mut AgentSession,
+    events: EventReceiver,
+) -> Result<(), BoxError> {
+    let channel = connect_channel(config).await?;
+    info!("Channel established to controller");
+    let mut client = TelemetryServiceClient::new(channel);
+
+    let mut connection = ConnectionManager::new(
+        client.clone(),
+        session.agent_id.clone(),
+        env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string()),
+        env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string()),
+        session.session_id.clone(),
+    );
+    if !connection.connect().await? {
+        return Err("Connection rejected by controller".into());
+    }
+    let session_id = connection
+        .get_session_id()
+        .ok_or("No active session for event stream")?
+        .to_string();
+    session.session_id = Some(session_id.clone());
+
+    let mut heartbeat_connection = connection.clone();
+    let mut heartbeat = tokio::spawn(async move { heartbeat_connection.start_heartbeat().await });
+
+    // The forwarder is the only reader of the shared receiver while this connection is
+    // live. Aborting it releases the receiver deterministically, even if the transport
+    // keeps the request stream alive after the connection has failed.
+    let (stream_tx, stream_rx) = mpsc::channel(STREAM_BUFFER_SIZE);
+    let forwarder = tokio::spawn(forward_to_stream(events, connection, stream_tx));
+
+    let request = authenticated_stream_request(
+        ReceiverStream::new(stream_rx),
+        &session.agent_id,
+        &session_id,
+    )?;
+    let result = tokio::select! {
+        result = stream_events(&mut client, request) => result,
+        heartbeat_result = &mut heartbeat => match heartbeat_result {
+            Ok(Ok(())) => Err("Heartbeat stopped".into()),
+            Ok(Err(e)) => Err(Box::new(e) as BoxError),
+            Err(e) => Err(Box::new(e) as BoxError),
+        },
+    };
+
+    heartbeat.abort();
+    forwarder.abort();
+    result
+}
+
+async fn forward_to_stream(
+    events: EventReceiver,
+    connection: ConnectionManager,
+    stream_tx: mpsc::Sender<SecurityEvent>,
+) {
+    let mut events = events.lock_owned().await;
+    while let Some(event) = events.recv().await {
+        match convert_eventoutput_to_securityevent(&event, &connection) {
+            Ok(security_event) => {
+                if stream_tx.send(security_event).await.is_err() {
+                    break; // Stream closed; the connection is ending.
+                }
             }
-            Err(e) => {
-                error!("Connection error: {}", e);
-                warn!("Retrying connection in {} ms...", RECONNECT_DELAY_MS);
-                tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
-            }
+            Err(e) => error!("Failed to convert event: {}", e),
         }
     }
 }
 
-async fn connect_and_run(config: AgentConfig) -> Result<(), BoxError> {
-    let uri = controller_uri(&config);
-
-    let endpoint = match Endpoint::from_shared(uri.clone()) {
-        Ok(endpoint) => endpoint,
-        Err(e) => {
-            error!("Failed to create endpoint: {}", e);
-            return Err(Box::new(e));
-        }
-    };
-
-    let endpoint = if config.mtls_enabled {
-        let tls_config = match load_client_tls_config(&config) {
-            Ok(tls_config) => tls_config,
-            Err(e) => {
-                error!("Failed to load mTLS client configuration: {}", e);
-                return Err(e);
-            }
-        };
-
-        match endpoint.tls_config(tls_config) {
-            Ok(endpoint) => endpoint,
-            Err(e) => {
-                error!("Failed to apply mTLS client configuration: {}", e);
-                return Err(Box::new(e));
-            }
-        }
-    } else {
-        endpoint
-    };
-
-    let channel = match endpoint
-        .tcp_keepalive(Some(Duration::from_secs(30)))
-        .tcp_nodelay(true)
-        .timeout(Duration::from_secs(10))
-        .connect()
-        .await
-    {
-        Ok(channel) => channel,
-        Err(e) => {
-            error!("Failed to connect to endpoint: {}", e);
-            return Err(Box::new(e));
-        }
-    };
-
-    info!("Channel established to controller");
-    let client = TelemetryServiceClient::new(channel.clone());
-
-    // Create and connect the connection manager
-    let mut conn_manager = ConnectionManager::new(
-        client.clone(),
-        env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string()),
-        env::var("POD_NAME").unwrap_or_else(|_| "unknown".to_string()),
-    );
-
-    match conn_manager.connect().await {
-        Ok(true) => {
-            info!("Successfully connected to controller");
-
-            // Create channels for event communication
-            let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
-
-            // Start the heartbeat task in a separate task
-            let mut heartbeat_manager = conn_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) = heartbeat_manager.start_heartbeat().await {
-                    error!("Heartbeat task failed: {}", e);
-                }
-            });
-
-            // Start container cache cleanup task (runs every 60 seconds)
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    let cache = get_cache();
-                    cache.cleanup_expired();
-
-                    // Log cache stats periodically
-                    let stats = cache.stats();
-                    debug!(
-                        "Container cache stats - size: {}, hits: {}, misses: {}, hit_rate: {:.1}%, evictions: {}",
-                        cache.len(),
-                        stats.hits,
-                        stats.misses,
-                        stats.hit_rate() * 100.0,
-                        stats.evictions
-                    );
-                }
-            });
-
-            // Start the syscall monitor
-            let mut monitor = SyscallMonitor::new()?;
-            monitor.attach()?;
-
-            // Set up ring buffer with callback
-            let tx = event_tx.clone();
-            let dropped_events = Arc::new(AtomicU64::new(0));
-            let channel_closed = Arc::new(AtomicBool::new(false));
-            monitor.setup_ring_buffer(move |data| {
-                if let Some(event_output) = agent_core::syscalls::parse_bpf_event(data) {
-                    match tx.try_send(event_output) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
-                            let dropped = dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
-                            if dropped == 1 || dropped.is_multiple_of(1_000) {
-                                warn!(
-                                    "Event channel full; dropping security event (total dropped: {})",
-                                    dropped
-                                );
-                            }
-                        }
-                        Err(TrySendError::Closed(_)) => {
-                            if !channel_closed.swap(true, Ordering::Relaxed) {
-                                error!("Event channel closed; dropping subsequent security events");
-                            }
-                        }
-                    }
-                }
-                0 // Continue processing events
-            })?;
-
-            // Spawn event collection task
-            let collection_handle = tokio::spawn(async move {
-                loop {
-                    if let Err(e) = monitor.poll(BPF_POLL_TIMEOUT_MS) {
-                        error!("Event collection error: {}", e);
-                        break;
-                    }
-                }
-            });
-
-            // Start event processing
-            let mut client = client.clone();
-            let conn_manager = Arc::new(Mutex::new(conn_manager));
-            let conn_manager_clone = Arc::clone(&conn_manager);
-            let (agent_id, session_id) = {
-                let connection = conn_manager.lock().await;
-                let session_id = connection
-                    .get_session_id()
-                    .ok_or("No active session for event stream")?
-                    .to_string();
-                (connection.get_agent_id().to_string(), session_id)
-            };
-
-            let events_stream = stream! {
-                let mut rx = tokio_stream::wrappers::ReceiverStream::new(event_rx);
-                while let Some(event) = rx.next().await {
-                    let conn_guard = conn_manager_clone.lock().await;
-                    if !conn_guard.is_connected() {
-                        error!("Lost connection to controller, attempting reconnect...");
-                        drop(conn_guard); // Release lock before reconnect
-
-                        // Try to reconnect
-                        let mut retry_count = 0;
-                        let mut reconnected = false;
-                        while retry_count < MAX_RETRIES {
-                            let mut conn_guard = conn_manager_clone.lock().await;
-                            match conn_guard.connect().await {
-                                Ok(true) => {
-                                    info!("Successfully reconnected to controller");
-                                    reconnected = true;
-                                    break;
-                                }
-                                _ => {
-                                    retry_count += 1;
-                                    warn!("Reconnect attempt {} failed, retrying in {} ms...", retry_count, RECONNECT_DELAY_MS);
-                                    drop(conn_guard); // Release lock before sleep
-                                    tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
-                                }
-                            }
-                        }
-                        if !reconnected {
-                            error!("Failed to reconnect after {} attempts", MAX_RETRIES);
-                            break;
-                        }
-                        continue; // Skip this event and try next one
-                    }
-
-                    match convert_eventoutput_to_securityevent(&event, &conn_guard) {
-                        Ok(security_event) => {
-                            yield security_event;
-                        }
-                        Err(e) => {
-                            error!("Failed to convert event: {}", e);
-                        }
-                    }
-                }
-            };
-
-            let stream_request =
-                authenticated_stream_request(events_stream, &agent_id, &session_id)?;
-            let stream_result = async {
-                let mut acknowledgements = client.stream_events(stream_request).await?.into_inner();
-                while let Some(acknowledgement) = acknowledgements.message().await? {
-                    if acknowledgement.success {
-                        debug!("Controller acknowledged security event");
-                    } else {
-                        warn!(
-                            "Controller rejected security event: {}",
-                            acknowledgement.message
-                        );
-                    }
-                }
-
-                Err::<(), BoxError>("Event acknowledgement stream closed".into())
-            }
-            .await;
-
-            collection_handle.abort();
-            stream_result
-        }
-        Ok(false) => {
-            error!("Failed to connect to controller");
-            Err("Connection failed".into())
-        }
-        Err(e) => {
-            error!("Connection error: {}", e);
-            Err(Box::new(e))
+async fn stream_events(
+    client: &mut TelemetryServiceClient<Channel>,
+    request: Request<ReceiverStream<SecurityEvent>>,
+) -> Result<(), BoxError> {
+    let mut acknowledgements = client.stream_events(request).await?.into_inner();
+    while let Some(acknowledgement) = acknowledgements.message().await? {
+        if acknowledgement.success {
+            debug!("Controller acknowledged security event");
+        } else {
+            warn!(
+                "Controller rejected security event: {}",
+                acknowledgement.message
+            );
         }
     }
+
+    Err("Event acknowledgement stream closed".into())
 }
 
 fn authenticated_stream_request<T>(
@@ -336,26 +293,18 @@ async fn main() -> Result<(), BoxError> {
 
     info!("Starting RASP Pod Agent...");
 
-    let config = Arc::new(Mutex::new(AgentConfig::load()));
-    {
-        let config = config.lock().await;
-        info!(
-            "Configuration loaded: controller_endpoint={}, mtls_enabled={}, tls_server_name={}",
-            config.controller_endpoint, config.mtls_enabled, config.mtls_server_name
-        );
-    }
-
-    let config = config.lock().await.clone();
+    let config = AgentConfig::load();
     info!(
-        "Attempting to connect to controller at: {}",
-        config.controller_endpoint
+        "Configuration loaded: controller_endpoint={}, mtls_enabled={}, tls_server_name={}",
+        config.controller_endpoint, config.mtls_enabled, config.mtls_server_name
     );
 
-    // Run the event sender
-    if let Err(e) = run_event_sender(config).await {
-        error!("Event sender error: {:?}", e);
-    }
+    // Fail fast: an agent that cannot load or attach its eBPF programs must not look healthy.
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+    start_monitor(event_tx)?;
+    spawn_cache_cleanup();
 
+    run_event_sender(config, Arc::new(Mutex::new(event_rx))).await;
     Ok(())
 }
 

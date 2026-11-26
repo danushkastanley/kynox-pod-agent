@@ -59,8 +59,34 @@ __always_inline static void init_event(struct exec_monitor_event *e, __u32 type)
     #endif
 }
 
+// The agent's own PID namespace and TGID within it, set by user space before load.
+// The agent reads /proc for every event it enriches; without this filter those reads
+// generate new events, which feed back into more reads and saturate the ring buffer.
+const volatile __u64 self_pidns_dev = 0;
+const volatile __u64 self_pidns_ino = 0;
+const volatile __u32 self_tgid = 0;
+
+// True when the current task belongs to the agent process (any of its threads).
+// The helper only succeeds for tasks whose active PID namespace is the agent's, so
+// TGIDs from other namespaces can never collide with self_tgid.
+__always_inline static bool is_self(void) {
+    struct bpf_pidns_info ns = {};
+
+    if (self_tgid == 0) {
+        return false;
+    }
+    if (bpf_get_ns_current_pid_tgid(self_pidns_dev, self_pidns_ino, &ns, sizeof(ns)) != 0) {
+        return false;
+    }
+    return ns.tgid == self_tgid;
+}
+
 // Helper to submit an event
 __always_inline static void submit_event(struct exec_monitor_event *e) {
+    if (is_self()) {
+        bpf_ringbuf_discard(e, 0);
+        return;
+    }
     if (should_rate_limit(e->event_type) && !check_rate_limit(e->pid)) {
         bpf_ringbuf_discard(e, 0);
         return;
