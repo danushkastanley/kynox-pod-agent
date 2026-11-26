@@ -20,6 +20,8 @@ use connection::ConnectionManager;
 
 use agent_core::SyscallMonitor;
 
+// Generated tonic client code returns tonic::Status (large) in Result; not ours to reshape.
+#[allow(clippy::result_large_err)]
 pub mod telemetry {
     tonic::include_proto!("telemetry");
 }

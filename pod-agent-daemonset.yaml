@@ -86,10 +86,6 @@ spec:
         - name: docker-data
           mountPath: /var/lib/docker
           readOnly: true
-        # Add k3s containerd socket
-        - name: k3s-containerd-sock
-          mountPath: /run/k3s/containerd/containerd.sock
-          readOnly: true
       terminationGracePeriodSeconds: 30
       volumes:                        # Define the hostPath volumes
       - name: sys-kernel-debug
@@ -136,8 +132,3 @@ spec:
         hostPath:
           path: /var/lib/docker
           type: DirectoryOrCreate
-      # Add k3s containerd socket
-      - name: k3s-containerd-sock
-        hostPath:
-          path: /run/k3s/containerd/containerd.sock
-          type: Socket

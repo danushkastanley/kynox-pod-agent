@@ -92,7 +92,10 @@ pod-agent/
 ## Prerequisites
 
 ### System Requirements
-- **Linux Kernel**: ≥ 5.8 with eBPF support and kernel headers
+- **Linux Kernel**: ≥ 5.8 with eBPF support and kernel BTF (`/sys/kernel/btf/vmlinux`)
+- **CPU architecture**: x86_64 or arm64 (aarch64). On arm64 the legacy `open(2)` and
+  `chmod(2)` syscalls do not exist; the same activity is captured through `openat(2)`
+  and `fchmodat(2)`.
 - **Container Runtime**: Docker, containerd, or compatible runtime
 - **Kubernetes**: A Linux-node cluster compatible with the kernel requirements above
 

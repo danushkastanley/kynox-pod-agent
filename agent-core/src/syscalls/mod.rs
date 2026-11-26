@@ -32,7 +32,18 @@ impl SyscallMonitor {
         // A monitor lives until process shutdown, so process-lifetime storage is
         // explicit and bounded to one allocation per monitor.
         let object = Box::leak(Box::new(MaybeUninit::uninit()));
-        let open_skel = skel_builder.open(object)?;
+        #[cfg_attr(target_arch = "x86_64", allow(unused_mut))]
+        let mut open_skel = skel_builder.open(object)?;
+
+        // open(2) and chmod(2) are legacy x86_64 syscalls. Kernels using the generic
+        // syscall table (arm64) have no tracepoints for them; the same activity is
+        // already captured through openat(2) and fchmodat(2).
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            open_skel.progs.handle_open.set_autoload(false);
+            open_skel.progs.handle_chmod.set_autoload(false);
+        }
+
         let skel = open_skel.load()?;
 
         Ok(Self {
