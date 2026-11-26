@@ -1,16 +1,44 @@
-# Pod-Agent: eBPF-based RASP Agent for Kubernetes
+# Kynox Pod Agent: eBPF runtime threat detection for Kubernetes
 
-An eBPF-based Runtime Application Self-Protection (RASP) telemetry agent for
-Kubernetes. It observes selected security-relevant system calls, enriches events
-with available workload context, and sends them to pod-controller.
+The node component of Kynox. A DaemonSet that observes selected security-relevant
+system calls with eBPF, enriches events with available workload context, and streams
+them to [`kynox-pod-controller`](https://github.com/danushkastanley/kynox-pod-controller)
+for classification and alerting.
+
+> [!NOTE]
+> **Project status: parked.** Kynox started as MSc research into eBPF runtime security
+> for Kubernetes. It is kept in a working state but is not under active feature
+> development. See [Project status](#project-status) for what is verified and what is not.
 
 > [!IMPORTANT]
 > This project is pre-1.0. The agent is a privileged node component and should be
 > evaluated in a non-production cluster before deployment. Review every hostPath,
 > capability, image, and network rule for your environment.
 
-The agent and [`pod-controller`](https://github.com/danushkastanley/pod-controller)
-must use matching release versions because they share a gRPC protocol.
+The agent and controller must be built from matching commits because they share a
+gRPC protocol. Kubernetes object names keep the project's earlier `rasp-` prefix
+(for example the `rasp-controller` Service).
+
+## Project status
+
+- **Verified in November 2026.** Builds for x86_64 and arm64. On a kind cluster
+  (arm64, Linux 7.0) using the manifests in this repository, the agent attaches all
+  eBPF programs, streams to the controller over mutual TLS, and a scripted attack
+  (reading `/etc/shadow`, `chmod 4777`, outbound connections to port 4444) is
+  classified CRITICAL with no dropped events.
+- **Detection only.** Kynox reports suspicious activity; it does not block it. For
+  in-kernel enforcement, look at Cilium Tetragon or KubeArmor. For a mature,
+  widely adopted detection engine, look at Falco.
+- **No published images or releases.** Build images from the Dockerfiles; the
+  manifests reference placeholder image tags.
+- **Known limitations:**
+  - Runtime behaviour on x86_64 kernels has not been re-verified since the 2026 fixes.
+  - On nested clusters such as kind, events cannot be attributed to pods and are
+    reported with namespace `unknown`.
+  - `UMOUNT` and `BPF_PROG` event types are defined in the protocol but not emitted.
+  - The controller logs every event, which is heavy on busy nodes.
+- Issues and pull requests are welcome, but responses may be slow. Report
+  vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Features
 
@@ -22,7 +50,7 @@ must use matching release versions because they share a gRPC protocol.
 ### File System Monitoring
 - **File Access**: Monitors `open`, `openat` operations with path tracking
 - **Permission Changes**: Tracks `chmod`, `fchmod`, `fchmodat` operations
-- **Mount Operations**: Detects mount/unmount operations for filesystem security
+- **Mount Operations**: Detects mount operations for filesystem security
 - **Directory Operations**: Comprehensive file system activity monitoring
 
 ### Network Activity Monitoring
@@ -34,7 +62,7 @@ must use matching release versions because they share a gRPC protocol.
 ### Security Operations Monitoring
 - **Privilege Escalation**: Detects `setuid`/`setgid` operations and capability changes
 - **Process Debugging**: Monitors `ptrace` system calls for potential code injection
-- **Security Mechanisms**: Tracks seccomp and BPF program loading operations
+- **Security Mechanisms**: Tracks seccomp operations
 - **Capability Management**: Monitors `capset` operations for privilege modifications
 
 ### Container Context Integration
@@ -152,8 +180,8 @@ docker run --privileged --pid=host pod-agent:0.1.0
 
 ```bash
 # Clone the repository
-git clone https://github.com/danushkastanley/pod-agent.git
-cd pod-agent
+git clone https://github.com/danushkastanley/kynox-pod-agent.git
+cd kynox-pod-agent
 
 # Build the core library first
 cd agent-core
@@ -253,9 +281,9 @@ env:
 | `SETGID` | `setgid` | Group ID changes |
 | `PTRACE` | `ptrace` | Process debugging |
 | `MOUNT` | `mount` | Filesystem mounting |
-| `UMOUNT` | `umount2` | Filesystem unmounting |
+| `UMOUNT` | `umount2` | Filesystem unmounting (defined, not emitted yet) |
 | `CAPSET` | `capset` | Capability changes |
-| `BPF_PROG` | `bpf` | eBPF program loading |
+| `BPF_PROG` | `bpf` | eBPF program loading (defined, not emitted yet) |
 | `SECCOMP` | `seccomp`, `prctl` | Syscall filtering |
 | `CHMOD` | `chmod`, `fchmod`, `fchmodat` | Permission changes |
 
