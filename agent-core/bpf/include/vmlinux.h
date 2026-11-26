@@ -99,13 +99,4 @@ struct trace_event_raw_sys_exit {
     long ret;
 };
 
-// Process forking structures
-struct sched_process_fork_args {
-    __u64 unused;
-    char parent_comm[16];
-    __s32 parent_pid;
-    char child_comm[16];
-    __s32 child_pid;
-};
-
 #endif /* __VMLINUX_H__ */

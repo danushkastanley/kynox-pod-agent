@@ -30,6 +30,15 @@ fn main() {
     let clang = env::var("BPF_CLANG").unwrap_or_else(|_| "clang".to_string());
     let cflags = env::var("BPF_CFLAGS").unwrap_or_default();
 
+    // The BPF object is loaded into a kernel of the agent's own architecture, so the
+    // libbpf arch macro and the Debian multiarch include directory follow the Cargo target.
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Cargo sets CARGO_CFG_TARGET_ARCH");
+    let (bpf_arch, multiarch) = match target_arch.as_str() {
+        "x86_64" => ("x86", "x86_64-linux-gnu"),
+        "aarch64" => ("arm64", "aarch64-linux-gnu"),
+        other => panic!("unsupported target architecture for the eBPF agent: {other}"),
+    };
+
     // Create a new builder instance that lives long enough
     let mut builder = SkeletonBuilder::new();
     builder.source(&bpf_src);
@@ -42,10 +51,10 @@ fn main() {
         "-O2".to_string(),
         "-target".to_string(),
         "bpf".to_string(),
-        "-D__TARGET_ARCH_x86".to_string(),
+        format!("-D__TARGET_ARCH_{bpf_arch}"),
         format!("-I{}", libelf_include_dir),
         format!("-I{}", libbpf_include_dir),
-        "-I/usr/include/x86_64-linux-gnu".to_string(),
+        format!("-I/usr/include/{multiarch}"),
         "-I/usr/include".to_string(),
         "-I./bpf/include".to_string(),
     ];

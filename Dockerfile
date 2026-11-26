@@ -43,11 +43,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
     . $CARGO_HOME/env && \
     rustup component add rustfmt
 
-# Set up kernel headers
-RUN ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm && \
-    ln -sf /usr/include/linux /usr/include/linux && \
-    ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so /usr/lib/libbpf.so
-
 WORKDIR /workspace
 
 # Copy dependency files first for better caching
@@ -71,12 +66,11 @@ COPY ./agent-core/build.rs ./agent-core/
 COPY ./agent-core/src/ ./agent-core/src/
 COPY ./agent-core/bpf/ ./agent-core/bpf/
 
-# Set LIBBPF path and build BPF code
-ENV LIBBPF_PATH=/usr/lib/x86_64-linux-gnu \
-    BPF_CLANG=clang-14 \
+# Build BPF code. build.rs derives the arch macro and multiarch include path from the
+# Cargo target, and libbpf-rs is vendored, so no architecture-specific paths are needed.
+ENV BPF_CLANG=clang-14 \
     LIBELF_INCLUDE_DIR=/usr/include \
-    LIBBPF_INCLUDE_DIR=/usr/include \
-    LIBBPF_LIB_DIR=/usr/lib/x86_64-linux-gnu
+    LIBBPF_INCLUDE_DIR=/usr/include
 
 RUN cd agent-core && cargo build --release --locked && cd ..
 

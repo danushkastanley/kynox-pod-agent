@@ -19,9 +19,11 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
-// Process fork handler
-SEC("tp/sched/sched_process_fork")
-int handle_fork(struct sched_process_fork_args *ctx) {
+// Process fork handler. The BTF-typed tracepoint receives the parent and child
+// task_struct pointers, so it does not depend on the raw tracepoint record layout,
+// which changed in newer kernels (comm fields became variable-length strings).
+SEC("tp_btf/sched_process_fork")
+int BPF_PROG(handle_fork, struct task_struct *parent, struct task_struct *child) {
     struct exec_monitor_event *e;
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) {
@@ -29,11 +31,9 @@ int handle_fork(struct sched_process_fork_args *ctx) {
     }
 
     init_event(e, EVENT_TYPE_FORK);
-    e->parent_pid = ctx->parent_pid;
-    e->child_pid = ctx->child_pid;
-
-    // Copy parent and child comm
-    bpf_probe_read_str(e->comm, sizeof(e->comm), ctx->parent_comm);
+    e->parent_pid = BPF_CORE_READ(parent, pid);
+    e->child_pid = BPF_CORE_READ(child, pid);
+    BPF_CORE_READ_STR_INTO(&e->comm, parent, comm);
 
     submit_event(e);
     return 0;
